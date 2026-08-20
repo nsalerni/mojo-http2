@@ -147,7 +147,7 @@ struct StreamState(Movable):
 
 
 struct Http2Connection[S: IOStream = TCPStream](Movable):
-    """HTTP/2 connection state machine over a blocking TCP stream.
+    """HTTP/2 connection state machine over a blocking byte stream.
 
     Usable as either endpoint: construct with `is_client=True` to send the
     connection preface, or `is_client=False` to expect it. Construction
@@ -165,6 +165,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     role, request header blocks are validated per §8.1/§8.2. Flood guards
     (rapid reset, PING/SETTINGS spam, oversized header lists) terminate
     abusive connections with ENHANCE_YOUR_CALM.
+
+    Parameters:
+        S: The underlying transport type, which must conform to `IOStream`.
     """
 
     var stream: Self.S

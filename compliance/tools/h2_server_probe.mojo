@@ -1,26 +1,23 @@
 # Compliance tool: run our Http2Connection as a SERVER against a reference
 # hyper-h2 client, which strictly validates every frame we emit.
 #
-# Usage: h2_server_probe
+# Usage: h2_server_probe [cert_pem key_pem]
 # Prints the bound port, accepts ONE connection, waits for one complete
 # request stream, echoes the body back with response headers + trailers,
 # then serves until the client disconnects.
 
-from h2 import Http2Connection
+from std.sys import argv
+
+from h2 import H2TLSContext, Http2Connection
 from hpack import HeaderField
-from net import TCPListener
+from net import IOStream, TCPListener
 
 
 def hf(name: StringSpan, value: StringSpan) -> HeaderField:
     return HeaderField(name=String(name), value=String(value))
 
 
-def main() raises:
-    var listener = TCPListener("127.0.0.1", 0)
-    print("PORT ", listener.local_port, sep="")
-    var tcp = listener.accept()
-    var conn = Http2Connection(tcp^, is_client=False)
-
+def serve[S: IOStream](mut conn: Http2Connection[S]) raises:
     # Wait for the first client-initiated stream to complete.
     var sid: UInt32 = 0
     while sid == 0:
@@ -47,4 +44,18 @@ def main() raises:
     except:
         pass
     conn.close()
+
+
+def main() raises:
+    var args = argv()
+    var listener = TCPListener("127.0.0.1", 0)
+    print("PORT ", listener.local_port, sep="")
+    var tcp = listener.accept()
+    if len(args) > 1:
+        var context = H2TLSContext.server(String(args[1]), String(args[2]))
+        var conn = context.accept(tcp^)
+        serve(conn)
+    else:
+        var conn = Http2Connection(tcp^, is_client=False)
+        serve(conn)
     listener.close()

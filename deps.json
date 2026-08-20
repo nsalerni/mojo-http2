@@ -3,6 +3,9 @@
   "deps": {
     "mojo-net": {
       "ref": "main"
+    },
+    "mojo-tls": {
+      "ref": "main"
     }
   }
 }

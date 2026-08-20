@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.1.0 — 2026-08-19
+## Unreleased
+
+- Added `H2TLSContext` for HTTP/2 over mojo-tls with mandatory `h2` ALPN.
+- Added TLS coverage against CPython ssl, hyper-h2, and all 146 h2spec cases.
+
+## 0.1.0 - 2026-08-19
 
 Initial release.
 
@@ -9,7 +14,7 @@ Initial release.
   and never-indexed (sensitive) fields. Byte-exact on all Appendix C
   vectors; differential vs python-hpack.
 - `h2`: RFC 9113 frame codec and connection state machine over blocking
-  TCP — preface/SETTINGS, stream multiplexing, §8 request validation,
+  TCP: preface/SETTINGS, stream multiplexing, §8 request validation,
   consume-driven flow control, GOAWAY/RST error signaling, and abuse
   guards (rapid reset, control-frame floods, concurrency and header-size
   caps). h2spec 146/146; live differential vs strict hyper-h2 both roles.

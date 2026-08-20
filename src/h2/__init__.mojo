@@ -13,15 +13,16 @@
 `frame` defines the wire constants (frame types, flags, error codes), the
 frame header codec, `Settings`, and big-endian helpers; `connection`
 provides `Http2Connection`, the full connection state machine over a
-blocking TCP stream, and `StreamState`, the receive-side state of one
-stream.
+blocking byte stream, and `StreamState`, the receive-side state of one
+stream. `secure` provides `H2TLSContext`, which requires `h2` ALPN and
+specializes the same connection over mojo-tls.
 
-Depends on `hpack` and `net` only; extractable as a standalone package.
-The design is single-threaded and caller-driven: there is no event loop —
+Depends on `hpack`, `net`, and `tls`; extractable as a standalone package.
+The design is single-threaded and caller-driven: there is no event loop;
 callers pump the connection by calling `Http2Connection.process_next_frame`
 (directly or via the `wait_*` helpers) until the state they need appears.
 
-Conformance is verified with h2spec: all 146 cases pass.
+Conformance is verified with h2spec in cleartext and TLS modes.
 """
 
 from .connection import Http2Connection, StreamState
@@ -69,3 +70,4 @@ from .frame import (
     put_u24_be,
     put_u32_be,
 )
+from .secure import H2_ALPN, H2TLSContext

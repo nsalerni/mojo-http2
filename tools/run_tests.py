@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run every test executable in test/ (pixi's task shell has no loops).
 
-h2 depends on mojo-net; its src/ path is resolved the same way as
-tools/dep_src.py: $MOJO_DEPS_DIR, .deps/ (fetch_deps.py), or a sibling
-../mojo-net checkout.
+h2 depends on mojo-net and mojo-tls; their src/ paths are resolved the
+same way as tools/dep_src.py: $MOJO_DEPS_DIR, .deps/ (fetch_deps.py), or
+sibling package checkouts.
 """
 
 import os
@@ -14,25 +14,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def net_src() -> str:
+def dep_src(name: str) -> str:
     candidates = []
     if os.environ.get("MOJO_DEPS_DIR"):
-        candidates.append(Path(os.environ["MOJO_DEPS_DIR"]) / "mojo-net" / "src")
-    candidates.append(ROOT / ".deps" / "mojo-net" / "src")
-    candidates.append(ROOT.parent / "mojo-net" / "src")
+        candidates.append(Path(os.environ["MOJO_DEPS_DIR"]) / name / "src")
+    candidates.append(ROOT / ".deps" / name / "src")
+    candidates.append(ROOT.parent / name / "src")
     for c in candidates:
         if c.is_dir():
             return str(c)
-    sys.exit("dependency 'mojo-net' not found; run `python3 tools/fetch_deps.py`")
+    sys.exit(f"dependency '{name}' not found; run `python3 tools/fetch_deps.py`")
 
 
 def main() -> int:
-    net = net_src()
+    net = dep_src("mojo-net")
+    tls = dep_src("mojo-tls")
     failed = 0
     for t in sorted((ROOT / "test").glob("test_*.mojo")):
         try:
             r = subprocess.run(
-                ["mojo", "run", "-I", "src", "-I", net, "-I", "test",
+                ["mojo", "run", "-I", "src", "-I", net, "-I", tls, "-I", "test",
                  str(t.relative_to(ROOT))],
                 cwd=ROOT, timeout=600,
             )

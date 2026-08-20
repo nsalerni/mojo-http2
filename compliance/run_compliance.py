@@ -27,7 +27,9 @@ import platform
 import random
 import re
 import shutil
+import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent  # package root
 BUILD = ROOT / "build"
 TOOLS = ROOT / "compliance" / "tools"
 REPORT = ROOT / "COMPLIANCE.md"
+CERTS = BUILD / "certs"
 
 RESULTS: dict[str, list[tuple[str, bool, str]]] = {}
 US = "\x1f"
@@ -62,7 +65,7 @@ def dep_path(name: str) -> Path:
     sys.exit(
         f"error: cannot find dependency '{name}': looked in "
         + ", ".join(str(c) for c in candidates)
-        + " — set MOJO_DEPS_DIR or place the package under .deps/"
+        + "; set MOJO_DEPS_DIR or place the package under .deps/"
     )
 
 
@@ -82,10 +85,12 @@ def build_tools():
     print("== building Mojo compliance tools ==")
     BUILD.mkdir(exist_ok=True)
     net_src = dep_path("mojo-net")
+    tls_src = dep_path("mojo-tls")
     for src in sorted(TOOLS.glob("*.mojo")):
         out = BUILD / src.stem
         subprocess.run(
-            ["mojo", "build", "-I", "src", "-I", str(net_src), "-I", "test",
+            ["mojo", "build", "-I", "src", "-I", str(net_src),
+             "-I", str(tls_src), "-I", "test",
              str(src.relative_to(ROOT)), "-o", str(out)],
             check=True, cwd=ROOT,
         )
@@ -291,12 +296,17 @@ def section_h2_frames(tmp: Path):
     record("h2", f"byte-identical frame serialization vs hyperframe ({len(frames)} cases)", ok, detail)
 
 
-def h2_reference_echo_server(sock: socket.socket, result: dict):
+def h2_reference_echo_server(
+    sock: socket.socket, result: dict, tls_context: ssl.SSLContext | None = None
+):
     """Reference hyper-h2 echo server for one connection; strict validation."""
     import h2.connection, h2.config, h2.events
     try:
         conn_sock, _ = sock.accept()
         conn_sock.settimeout(30)
+        if tls_context is not None:
+            conn_sock = tls_context.wrap_socket(conn_sock, server_side=True)
+            result["alpn"] = conn_sock.selected_alpn_protocol()
         config = h2.config.H2Configuration(client_side=False, header_encoding="utf-8")
         conn = h2.connection.H2Connection(config=config)
         conn.initiate_connection()
@@ -437,6 +447,197 @@ def section_h2_live(tmp: Path):
     record("h2", "hyper-h2 client vs mojo server (50KB echo, strict validation)", ok, detail)
 
 
+def python_h2_server_context(*, advertise_h2: bool = True) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(CERTS / "server.pem", CERTS / "server.key")
+    if advertise_h2:
+        context.set_alpn_protocols(["h2"])
+    return context
+
+
+def section_h2_tls(tmp: Path):
+    print("== h2 over TLS vs CPython ssl + hyper-h2 ==")
+
+    # Our TLS client and HTTP/2 state machine against the two reference
+    # layers in the same connection.
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    port = lsock.getsockname()[1]
+    result: dict = {}
+    thread = threading.Thread(
+        target=h2_reference_echo_server,
+        args=(lsock, result, python_h2_server_context()),
+        daemon=True,
+    )
+    thread.start()
+    n = 80_000
+    r = run_tool(
+        "h2_client_probe", port, n, CERTS / "ca.pem", "localhost", timeout=60
+    )
+    thread.join(timeout=30)
+    lsock.close()
+    output = r.stdout.strip()
+    ok = (
+        r.returncode == 0
+        and "error" not in result
+        and result.get("alpn") == "h2"
+        and f"status=200 len={n} match=True trailer=ok" in output
+    )
+    record(
+        "h2_tls",
+        "mojo client vs CPython ssl + hyper-h2 server (80KB echo, ALPN h2)",
+        ok,
+        f"out={output!r} err={r.stderr[:150]!r} server={result.get('error', '')}",
+    )
+
+    # The strict reference client runs HTTP/2 over a verified TLS channel
+    # to our server.
+    proc = subprocess.Popen(
+        [
+            str(BUILD / "h2_server_probe"),
+            str(CERTS / "server.pem"),
+            str(CERTS / "server.key"),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+    )
+    port = int(proc.stdout.readline().strip().removeprefix("PORT "))
+    ok, detail = False, ""
+    try:
+        context = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+        context.set_alpn_protocols(["h2"])
+        raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+        tls_sock = context.wrap_socket(raw, server_hostname="localhost")
+        tls_sock.settimeout(30)
+
+        import h2.connection
+        import h2.config
+        import h2.events
+
+        config = h2.config.H2Configuration(
+            client_side=True, header_encoding="utf-8"
+        )
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        tls_sock.sendall(conn.data_to_send())
+        sid = conn.get_next_available_stream_id()
+        conn.send_headers(
+            sid,
+            [
+                (":method", "POST"),
+                (":scheme", "https"),
+                (":path", "/echo"),
+                (":authority", "localhost"),
+            ],
+        )
+        payload = bytes(i % 251 for i in range(32_000))
+        conn.send_data(sid, payload[:16_000], end_stream=False)
+        conn.send_data(sid, payload[16_000:], end_stream=True)
+        tls_sock.sendall(conn.data_to_send())
+        received = bytearray()
+        status = trailer = None
+        ended = False
+        while not ended:
+            data = tls_sock.recv(65535)
+            if not data:
+                break
+            for event in conn.receive_data(data):
+                if isinstance(event, h2.events.ResponseReceived):
+                    status = dict(event.headers).get(":status")
+                elif isinstance(event, h2.events.DataReceived):
+                    received += event.data
+                    conn.acknowledge_received_data(
+                        event.flow_controlled_length, event.stream_id
+                    )
+                elif isinstance(event, h2.events.TrailersReceived):
+                    trailer = dict(event.headers).get("x-check")
+                elif isinstance(event, h2.events.StreamEnded):
+                    ended = True
+            tls_sock.sendall(conn.data_to_send())
+        ok = (
+            tls_sock.selected_alpn_protocol() == "h2"
+            and status == "200"
+            and bytes(received) == payload
+            and trailer == "ok"
+        )
+        detail = (
+            f"alpn={tls_sock.selected_alpn_protocol()} status={status} "
+            f"len={len(received)} trailer={trailer}"
+        )
+        tls_sock.close()
+    except Exception as error:
+        detail = f"reference client rejected our server: {error!r}"
+    finally:
+        proc.kill()
+        proc.wait()
+    record(
+        "h2_tls",
+        "CPython ssl + hyper-h2 client vs mojo server (verified TLS, ALPN h2)",
+        ok,
+        detail,
+    )
+
+    # A TLS peer that completes the handshake without selecting h2 must
+    # not be allowed to start the HTTP/2 connection preface.
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    port = lsock.getsockname()[1]
+    result = {}
+    thread = threading.Thread(
+        target=h2_reference_echo_server,
+        args=(lsock, result, python_h2_server_context(advertise_h2=False)),
+        daemon=True,
+    )
+    thread.start()
+    r = run_tool(
+        "h2_client_probe", port, 16, CERTS / "ca.pem", "localhost", timeout=30
+    )
+    thread.join(timeout=10)
+    lsock.close()
+    client_rejected = (
+        r.returncode != 0
+        and "required h2 ALPN token" in (r.stderr + r.stdout)
+        and result.get("alpn") is None
+    )
+
+    proc = subprocess.Popen(
+        [
+            str(BUILD / "h2_server_probe"),
+            str(CERTS / "server.pem"),
+            str(CERTS / "server.key"),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+    )
+    port = int(proc.stdout.readline().strip().removeprefix("PORT "))
+    server_rejected = False
+    try:
+        context = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+        context.set_alpn_protocols(["http/1.1"])
+        raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+        context.wrap_socket(raw, server_hostname="localhost")
+    except ssl.SSLError:
+        server_rejected = True
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    record(
+        "h2_tls",
+        "both HTTP/2 roles reject TLS connections without negotiated h2 ALPN",
+        client_rejected and server_rejected,
+        f"client={client_rejected} server={server_rejected} err={r.stderr[:150]!r}",
+    )
+
+
 def section_h2spec(tmp: Path):
     print("== h2spec (RFC 9113/7541 conformance tool) ==")
     h2spec_bin = shutil.which("h2spec")
@@ -444,20 +645,48 @@ def section_h2spec(tmp: Path):
         record("h2", "h2spec conformance (tool not installed; brew install h2spec)",
                False, "h2spec binary not found on PATH")
         return
-    proc = subprocess.Popen([str(BUILD / "h2spec_server")],
-                            stdout=subprocess.PIPE, text=True, cwd=ROOT)
-    port = proc.stdout.readline().strip().removeprefix("PORT ")
-    try:
-        r = subprocess.run([h2spec_bin, "-p", port, "-h", "127.0.0.1"],
-                           capture_output=True, text=True, timeout=600)
-        msum = re.search(r"(\d+) tests, (\d+) passed, (\d+) skipped, (\d+) failed",
-                         r.stdout)
-        ok = bool(msum) and msum.group(4) == "0"
-        record("h2", f"h2spec full run ({msum.group(0) if msum else 'no summary'})",
-               ok, r.stdout[-300:] if not ok else "")
-    finally:
-        proc.kill(); proc.wait()
-        subprocess.run(["pkill", "-f", "h2spec_server"], capture_output=True)
+    for use_tls in (False, True):
+        server_args = [str(BUILD / "h2spec_server")]
+        h2spec_args = [h2spec_bin, "-h", "127.0.0.1"]
+        if use_tls:
+            server_args += [
+                str(CERTS / "server.pem"), str(CERTS / "server.key")
+            ]
+            h2spec_args += ["--tls", "--insecure"]
+        proc = subprocess.Popen(
+            server_args,
+            stdout=subprocess.PIPE,
+            text=True,
+            cwd=ROOT,
+            start_new_session=True,
+        )
+        port = proc.stdout.readline().strip().removeprefix("PORT ")
+        try:
+            r = subprocess.run(
+                [*h2spec_args, "-p", port],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            msum = re.search(
+                r"(\d+) tests, (\d+) passed, (\d+) skipped, (\d+) failed",
+                r.stdout,
+            )
+            ok = bool(msum) and msum.group(4) == "0"
+            section = "h2_tls" if use_tls else "h2"
+            mode = "TLS" if use_tls else "cleartext"
+            record(
+                section,
+                f"h2spec {mode} full run ({msum.group(0) if msum else 'no summary'})",
+                ok,
+                r.stdout[-300:] if not ok else "",
+            )
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            proc.wait()
 
 
 # --------------------------------------------------------------- report ---
@@ -471,6 +700,7 @@ def versions() -> dict[str, str]:
         "hpack (reference for hpack)": hpack.__version__,
         "h2/hyper-h2 (reference for h2)": h2.__version__,
         "hyperframe (reference for h2 frames)": hyperframe.__version__,
+        "ssl (reference for TLS)": ssl.OPENSSL_VERSION,
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
     }
 
@@ -478,6 +708,7 @@ def versions() -> dict[str, str]:
 SECTION_TITLES = {
     "hpack": "`hpack` vs python-hpack",
     "h2": "`h2` vs hyper-h2 / hyperframe / h2spec",
+    "h2_tls": "`h2` over TLS vs CPython ssl / hyper-h2 / h2spec",
 }
 
 
@@ -488,14 +719,14 @@ def write_report() -> bool:
     lines = [
         "# mojo-http2 Compliance Report",
         "",
-        "<!-- GENERATED by compliance/run_compliance.py — do not edit. -->",
+        "<!-- GENERATED by compliance/run_compliance.py; do not edit. -->",
         "<!-- Regenerate with: pixi run compliance -->",
         "",
         f"**Result: {passed}/{total} checks passed.** Generated {now}.",
         "",
-        "Every check compares mojo-http2 against an established reference —",
+        "Every check compares mojo-http2 against an established reference:",
         "python-hpack, hyper-h2/hyperframe (strict: any protocol violation",
-        "raises), and h2spec — never against itself.",
+        "raises), CPython ssl, and h2spec. It never grades itself.",
         "",
         "## Environment",
         "",
@@ -507,10 +738,10 @@ def write_report() -> bool:
     for section, rows in RESULTS.items():
         p = sum(1 for _, ok, _ in rows if ok)
         title = SECTION_TITLES.get(section, f"`{section}`")
-        lines += ["", f"## {title} — {p}/{len(rows)}", "",
+        lines += ["", f"## {title}: {p}/{len(rows)}", "",
                   "| Check | Result |", "|---|---|"]
         for name, ok, detail in rows:
-            status = "✅ pass" if ok else f"❌ **fail** — {detail[:160]}"
+            status = "✅ pass" if ok else f"❌ **fail**: {detail[:160]}"
             lines.append(f"| {name} | {status} |")
     lines += [
         "",
@@ -520,8 +751,8 @@ def write_report() -> bool:
         "pixi run compliance   # from this package root",
         "```",
         "",
-        "h2spec must be on PATH (`brew install h2spec`); mojo-net sources are",
-        "located via MOJO_DEPS_DIR, .deps/mojo-net/src, or ../mojo-net/src.",
+        "h2spec must be on PATH (`brew install h2spec`); mojo-net and mojo-tls",
+        "sources are located via MOJO_DEPS_DIR, .deps/, or sibling checkouts.",
         "",
     ]
     REPORT.write_text("\n".join(lines))
@@ -600,9 +831,8 @@ def esc(t: str) -> str:
 
 HTML_EYEBROW = "mojo-http2 &middot; differential compliance run"
 HTML_H1 = "HPACK and HTTP/2 checked against the tools that reject violations"
-HTML_THESIS = ("No self-grading: header compression is judged by python-hpack in both directions, frames byte-for-byte by hyperframe, live connections by a strict hyper-h2 peer, and the full RFC 9113/7541 surface by h2spec.")
+HTML_THESIS = ("No self-grading: header compression is judged by python-hpack in both directions, frames byte-for-byte by hyperframe, live connections by strict hyper-h2 peers, TLS by CPython ssl, and the full RFC 9113/7541 surface by h2spec in cleartext and TLS modes.")
 HTML_GAPS = [
-    ("TLS / ALPN", "h2c cleartext only; needs a Mojo TLS binding."),
     ("Priority scheduling", "PRIORITY frames are validated and ignored (per RFC 9113 deprecation)."),
     ("hpack value encoding", "header values are UTF-8 Strings; arbitrary octets are out of scope for now (gRPC uses base64 -bin metadata)."),
 ]
@@ -611,6 +841,8 @@ HTML_SECTIONS = {
               "Sequential header blocks encoded by one implementation and decoded by the other, in both directions, with dynamic-table state carried across blocks, mid-stream size updates, and multibyte UTF-8 values."),
     "h2": ("`h2` vs hyper-h2 / hyperframe / h2spec",
            "Frame codec cross-checked byte-for-byte against hyperframe in both directions. Live connections run against hyper-h2, which raises ProtocolError on any protocol violation by the peer. h2spec runs its full RFC 9113/7541 suite against our server."),
+    "h2_tls": ("`h2` over TLS vs CPython ssl / hyper-h2 / h2spec",
+               "Both HTTP/2 roles run through verified CPython TLS peers and strict hyper-h2 state machines. ALPN omission and mismatch are rejected. h2spec repeats its complete run over TLS."),
 }
 
 
@@ -661,7 +893,7 @@ def write_html_report():
 
     h.append('<section class="gaps"><h2>Known gaps (tracked, not silent)</h2><ul>')
     for k, v in HTML_GAPS:
-        h.append(f"<li><strong>{esc(k)}</strong> &mdash; {esc(v)}</li>")
+        h.append(f"<li><strong>{esc(k)}</strong>: {esc(v)}</li>")
     h.append("</ul></section>")
     h.append(
         "<footer>Generated by compliance/run_compliance.py &middot; "
@@ -685,6 +917,7 @@ def main() -> int:
         section_hpack(tmp)
         section_h2_frames(tmp)
         section_h2_live(tmp)
+        section_h2_tls(tmp)
         section_h2spec(tmp)
     ok = write_report()
     write_html_report()

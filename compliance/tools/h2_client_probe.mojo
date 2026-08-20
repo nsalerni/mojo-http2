@@ -3,28 +3,22 @@
 # send (it raises ProtocolError on violations), so a clean 200 + echoed
 # body is a meaningful state-machine compliance signal.
 #
-# Usage: h2_client_probe <port> <nbytes>
+# Usage: h2_client_probe <port> <nbytes> [ca_pem server_name]
 # Sends POST /echo with nbytes of patterned data; prints:
 #   status=<:status> len=<echoed bytes> match=<true|false> trailer=<x-check>
 
 from std.sys import argv
 
-from h2 import Http2Connection
+from h2 import H2TLSContext, Http2Connection
 from hpack import HeaderField
-from net import TCPStream
+from net import IOStream, TCPStream
 
 
 def hf(name: StringSpan, value: StringSpan) -> HeaderField:
     return HeaderField(name=String(name), value=String(value))
 
 
-def main() raises:
-    var args = argv()
-    var port = UInt16(Int(args[1]))
-    var n = Int(args[2])
-
-    var tcp = TCPStream.connect("127.0.0.1", port)
-    var conn = Http2Connection(tcp^, is_client=True)
+def run_probe[S: IOStream](mut conn: Http2Connection[S], n: Int) raises:
     # The reference server responds with a ~32KB header block (to exercise
     # CONTINUATION reassembly); raise the advisory header-list cap for it.
     conn.max_header_list_size = 65536
@@ -86,3 +80,17 @@ def main() raises:
         sep="",
     )
     conn.close()
+
+
+def main() raises:
+    var args = argv()
+    var port = UInt16(Int(args[1]))
+    var n = Int(args[2])
+    var tcp = TCPStream.connect("127.0.0.1", port)
+    if len(args) > 3:
+        var context = H2TLSContext.client(ca_file=String(args[3]))
+        var conn = context.connect(tcp^, String(args[4]))
+        run_probe(conn, n)
+    else:
+        var conn = Http2Connection(tcp^, is_client=True)
+        run_probe(conn, n)

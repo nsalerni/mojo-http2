@@ -5,21 +5,24 @@
 # h2spec opens one connection per test; connections are served
 # sequentially, errors drop the connection and the loop accepts the next.
 #
-# Usage: h2spec_server  (prints "PORT <n>", serves forever)
+# Usage: h2spec_server [cert_pem key_pem]
+# Prints "PORT <n>" and serves forever, with TLS when certificate paths
+# are provided.
 
 from std.ffi import c_int, external_call
 from std.sys import CompilationTarget
+from std.sys import argv
 
-from h2 import Http2Connection
+from h2 import H2TLSContext, Http2Connection
 from hpack import HeaderField
-from net import TCPStream, TCPListener, is_timeout_error
+from net import IOStream, TCPStream, TCPListener, is_timeout_error
 
 
 def hf(name: StringSpan, value: StringSpan) -> HeaderField:
     return HeaderField(name=String(name), value=String(value))
 
 
-def serve_connection(mut conn: Http2Connection[TCPStream]) raises:
+def serve_connection[S: IOStream](mut conn: Http2Connection[S]) raises:
     var responded = List[UInt32]()
     while True:
         conn.process_next_frame()
@@ -59,6 +62,7 @@ def serve_connection(mut conn: Http2Connection[TCPStream]) raises:
 
 
 def main() raises:
+    var args = argv()
     var listener = TCPListener("127.0.0.1", 0)
     print("PORT ", listener.local_port, sep="")
     # Reap children automatically (SIG_IGN for SIGCHLD).
@@ -78,11 +82,21 @@ def main() raises:
         if pid == 0:
             listener.close()
             try:
-                var conn = Http2Connection(tcp^, is_client=False)
-                try:
-                    serve_connection(conn)
-                except:
-                    conn.close()
+                if len(args) > 1:
+                    var context = H2TLSContext.server(
+                        String(args[1]), String(args[2])
+                    )
+                    var conn = context.accept(tcp^)
+                    try:
+                        serve_connection(conn)
+                    except:
+                        conn.close()
+                else:
+                    var conn = Http2Connection(tcp^, is_client=False)
+                    try:
+                        serve_connection(conn)
+                    except:
+                        conn.close()
             except:
                 pass
             external_call["_exit", NoneType](c_int(0))

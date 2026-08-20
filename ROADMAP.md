@@ -10,20 +10,20 @@ whatever is new.
 
 `Http2Connection` is now generic over mojo-net's `IOStream` trait
 (`Http2Connection[S: IOStream = TCPStream]`), so the protocol logic runs
-over TCP, Unix sockets, or the future TLS stream without change. Verified
+over TCP, Unix sockets, or TLS without protocol changes. Verified
 as a pure refactor: h2spec stayed at 146/146 and every differential and
 unit suite passed unchanged.
 
-## 2. HTTP/2 over TLS with ALPN
+## 2. HTTP/2 over TLS with ALPN (shipped)
 
-Depends on the planned `mojo-tls` package (see the mojo-net roadmap).
-Client and server constructors over a TLS stream, offering and requiring
-the `h2` ALPN token, with mismatches rejected cleanly. h2c stays fully
-supported.
+`H2TLSContext` builds client and server connections over mojo-tls, offers
+or accepts only the `h2` ALPN token, and rejects peers that do not
+negotiate it. The existing connection state machine runs over `TLSStream`
+through the `IOStream` trait. h2c stays fully supported.
 
-Verified by: h2spec run in TLS mode against our server, hyper-h2 over
-CPython's `ssl` module in both roles, and a curl `--http2` smoke test.
-The compliance report grows a TLS section alongside the existing h2c one.
+Verified by h2spec in TLS mode and by hyper-h2 over CPython's `ssl` module
+in both roles. The same suite checks certificate verification, ALPN
+selection, and rejection when `h2` is not negotiated.
 
 ## Deliberate non-goals
 
