@@ -12,14 +12,14 @@ from std.sys import CompilationTarget
 
 from h2 import Http2Connection
 from hpack import HeaderField
-from net import TCPListener, is_timeout_error
+from net import TCPStream, TCPListener, is_timeout_error
 
 
 def hf(name: StringSpan, value: StringSpan) -> HeaderField:
     return HeaderField(name=String(name), value=String(value))
 
 
-def serve_connection(mut conn: Http2Connection) raises:
+def serve_connection(mut conn: Http2Connection[TCPStream]) raises:
     var responded = List[UInt32]()
     while True:
         conn.process_next_frame()
@@ -28,14 +28,14 @@ def serve_connection(mut conn: Http2Connection) raises:
         # against the concurrency limit before responses close earlier
         # streams. h2spec writes whole frames, so a timeout mid-frame
         # (which would desync) cannot happen here.
-        conn.tcp.set_read_timeout(50_000_000)
+        conn.stream.set_read_timeout(50_000_000)
         try:
             while True:
                 conn.process_next_frame()
         except e:
             if not is_timeout_error(e):
                 raise e
-        conn.tcp.set_read_timeout(0)
+        conn.stream.set_read_timeout(0)
         var ids = conn.stream_ids.copy()
         for sid in ids:
             var done = False

@@ -14,8 +14,8 @@ def hf(name: StringSpan, value: StringSpan) -> HeaderField:
 
 @fieldwise_init
 struct ConnPair(Movable):
-    var client: Http2Connection
-    var server: Http2Connection
+    var client: Http2Connection[TCPStream]
+    var server: Http2Connection[TCPStream]
 
 
 def make_pair() raises -> ConnPair:

@@ -6,16 +6,13 @@ rerunning the full existing gauntlet (h2spec, hyper-h2 live in both roles,
 hyperframe byte comparisons) on every change, and extending it to cover
 whatever is new.
 
-## 1. Generalize the connection over a stream trait
+## 1. Generalize the connection over a stream trait (shipped)
 
-`Http2Connection` currently holds a `TCPStream` directly. Introducing a
-small stream trait (read, write_all, close) that both `TCPStream` and the
-future `TLSStream` implement lets the connection run over either transport
-without touching protocol logic. This is a pure refactor.
-
-Verified by: the entire existing suite rerun unchanged. h2spec must stay
-at 146/146 and the hyper-h2 differentials must stay green; any behavior
-change fails the refactor.
+`Http2Connection` is now generic over mojo-net's `IOStream` trait
+(`Http2Connection[S: IOStream = TCPStream]`), so the protocol logic runs
+over TCP, Unix sockets, or the future TLS stream without change. Verified
+as a pure refactor: h2spec stayed at 146/146 and every differential and
+unit suite passed unchanged.
 
 ## 2. HTTP/2 over TLS with ALPN
 

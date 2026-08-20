@@ -31,7 +31,7 @@ per-stream buffering is bounded by the window size (backpressure).
 from hpack import Decoder as HpackDecoder
 from hpack import Encoder as HpackEncoder
 from hpack import HeaderField
-from net import TCPStream
+from net import IOStream, TCPStream
 
 from .frame import (
     CONNECTION_PREFACE,
@@ -146,7 +146,7 @@ struct StreamState(Movable):
         return self.end_stream or Bool(self.reset_code)
 
 
-struct Http2Connection(Movable):
+struct Http2Connection[S: IOStream = TCPStream](Movable):
     """HTTP/2 connection state machine over a blocking TCP stream.
 
     Usable as either endpoint: construct with `is_client=True` to send the
@@ -167,8 +167,8 @@ struct Http2Connection(Movable):
     abusive connections with ENHANCE_YOUR_CALM.
     """
 
-    var tcp: TCPStream
-    """The underlying blocking TCP stream."""
+    var stream: Self.S
+    """The underlying byte stream (TCP by default; any `IOStream`)."""
     var is_client: Bool
     """True when this endpoint initiated the connection."""
     var hpack_enc: HpackEncoder
@@ -210,7 +210,7 @@ struct Http2Connection(Movable):
     var max_header_list_size: Int
     """Our limit on the uncompressed size of a received header list."""
 
-    def __init__(out self, var tcp: TCPStream, *, is_client: Bool) raises:
+    def __init__(out self, var stream: Self.S, *, is_client: Bool) raises:
         """Performs the connection preface exchange and sends our SETTINGS.
 
         As a client, writes the [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
@@ -219,8 +219,8 @@ struct Http2Connection(Movable):
         peer's SETTINGS here; `process_next_frame` handles (and ACKs) it.
 
         Args:
-            tcp: The connected TCP stream; ownership is taken and
-                TCP_NODELAY is enabled.
+            stream: The connected stream; ownership is taken and the
+                no-delay latency hint is applied.
             is_client: True to act as the client endpoint, False as the
                 server.
 
@@ -229,7 +229,7 @@ struct Http2Connection(Movable):
             is malformed — after responding with GOAWAY(PROTOCOL_ERROR)
             per §3.4.
         """
-        self.tcp = tcp^
+        self.stream = stream^
         self.is_client = is_client
         self.hpack_enc = HpackEncoder()
         self.hpack_dec = HpackDecoder()
@@ -250,7 +250,7 @@ struct Http2Connection(Movable):
         self.control_frames = 0
         self.max_concurrent_streams = 256
         self.max_header_list_size = 16384
-        self.tcp.set_nodelay(True)
+        self.stream.set_nodelay(True)
 
         var our = List[Byte]()
         put_u16_be(our, SETTINGS_MAX_CONCURRENT_STREAMS)
@@ -258,10 +258,10 @@ struct Http2Connection(Movable):
         put_u16_be(our, SETTINGS_MAX_HEADER_LIST_SIZE)
         put_u32_be(our, UInt32(self.max_header_list_size))
         if is_client:
-            self.tcp.write_all(StaticString(CONNECTION_PREFACE).as_bytes())
+            self.stream.write_all(StaticString(CONNECTION_PREFACE).as_bytes())
             self._write_frame(FRAME_SETTINGS, 0, 0, our.copy())
         else:
-            var preface = self.tcp.read_exact(
+            var preface = self.stream.read_exact(
                 StaticString(CONNECTION_PREFACE).byte_length()
             )
             if String(from_utf8=preface) != String(
@@ -296,17 +296,17 @@ struct Http2Connection(Movable):
         )
         header.serialize(buf)
         buf.extend(Span(payload))
-        self.tcp.write_all(Span(buf))
+        self.stream.write_all(Span(buf))
 
     def _read_frame(mut self) raises -> Frame:
         """Read one frame, enforcing our max frame size."""
-        var head = self.tcp.read_exact(FRAME_HEADER_LEN)
+        var head = self.stream.read_exact(FRAME_HEADER_LEN)
         var header = FrameHeader.parse(Span(head))
         if header.length > Int(self.our_settings.max_frame_size):
             raise Error("h2: peer frame exceeds our max frame size")
         var payload = List[Byte]()
         if header.length > 0:
-            payload = self.tcp.read_exact(header.length)
+            payload = self.stream.read_exact(header.length)
         return Frame(header=header, payload=payload^)
 
     # --- stream helpers ---
@@ -562,7 +562,7 @@ struct Http2Connection(Movable):
             (after GOAWAY has been sent). The connection is unusable
             afterwards.
         """
-        var head = self.tcp.read_exact(FRAME_HEADER_LEN)
+        var head = self.stream.read_exact(FRAME_HEADER_LEN)
         var h = FrameHeader.parse(Span(head))
         if h.length > Int(self.our_settings.max_frame_size):
             self._conn_error(
@@ -570,7 +570,7 @@ struct Http2Connection(Movable):
             )
         var frame_payload = List[Byte]()
         if h.length > 0:
-            frame_payload = self.tcp.read_exact(h.length)
+            frame_payload = self.stream.read_exact(h.length)
 
         if h.frame_type == FRAME_DATA or h.frame_type == FRAME_HEADERS:
             self.control_frames = 0
@@ -1114,4 +1114,4 @@ struct Http2Connection(Movable):
 
         Call `send_goaway` first for a graceful shutdown.
         """
-        self.tcp.close()
+        self.stream.close()
