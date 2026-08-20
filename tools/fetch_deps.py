@@ -13,10 +13,11 @@ Already-present directories are left untouched — a monorepo-style checkout
 or a developer's own clone always wins over a fresh fetch. Use --update to
 fast-forward previously fetched clones to their pinned ref.
 
-URL selection: $GIT_URL_TEMPLATE (default "git@github.com:nsalerni/{name}.git").
-CI uses per-dependency SSH host aliases, e.g.
-GIT_URL_TEMPLATE="git@github.com-{name}:nsalerni/{name}.git" with matching
-~/.ssh/config entries carrying read-only deploy keys.
+URL selection: $GIT_URL_TEMPLATE (default
+"https://github.com/nsalerni/{name}.git", which works anonymously for
+public repos). CI on private repos overrides with per-dependency SSH host
+aliases, e.g. GIT_URL_TEMPLATE="git@github.com-{name}:nsalerni/{name}.git"
+with matching ~/.ssh/config entries carrying read-only deploy keys.
 """
 
 import json
@@ -26,7 +27,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TEMPLATE = "git@github.com:nsalerni/{name}.git"
+DEFAULT_TEMPLATE = "https://github.com/nsalerni/{name}.git"
 
 
 def main() -> int:
