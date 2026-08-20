@@ -63,9 +63,9 @@ pixi run bench                # HPACK/frame coding benchmarks
 ## Status
 
 Extracted from [grpc-mojo](https://github.com/nsalerni/grpc-mojo), where it
-carries that project's transport. Not yet implemented: TLS/ALPN (h2c only),
-PUSH_PROMISE (rejected per spec for our roles), priority scheduling
-(PRIORITY frames are validated and ignored).
+carries that project's transport. TLS/ALPN support is planned (h2c only for
+now); PUSH_PROMISE and the deprecated RFC 7540 priority tree are deliberate
+non-goals. Details and sequencing in [ROADMAP.md](ROADMAP.md).
 
 ## License
 
