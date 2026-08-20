@@ -30,13 +30,18 @@ def main() -> int:
     net = net_src()
     failed = 0
     for t in sorted((ROOT / "test").glob("test_*.mojo")):
-        r = subprocess.run(
-            ["mojo", "run", "-I", "src", "-I", net, "-I", "test",
-             str(t.relative_to(ROOT))],
-            cwd=ROOT,
-        )
-        print(("PASS " if r.returncode == 0 else "FAIL ") + t.name)
-        failed += r.returncode != 0
+        try:
+            r = subprocess.run(
+                ["mojo", "run", "-I", "src", "-I", net, "-I", "test",
+                 str(t.relative_to(ROOT))],
+                cwd=ROOT, timeout=600,
+            )
+            ok = r.returncode == 0
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT {t.name} (600s)")
+            ok = False
+        print(("PASS " if ok else "FAIL ") + t.name)
+        failed += not ok
     return 1 if failed else 0
 
 
