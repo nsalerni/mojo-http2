@@ -24,15 +24,7 @@ jobs:
           cache: true
 
       - name: Fetch source dependencies (mojo-net)
-        env:
-          MOJO_NET_DEPLOY_KEY: ${{ secrets.MOJO_NET_DEPLOY_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          echo "$MOJO_NET_DEPLOY_KEY" > ~/.ssh/dep_mojo-net
-          chmod 600 ~/.ssh/dep_mojo-net
-          printf "Host github.com-mojo-net\n  HostName github.com\n  User git\n  IdentityFile ~/.ssh/dep_mojo-net\n" >> ~/.ssh/config
-          GIT_URL_TEMPLATE="git@github.com-{name}:nsalerni/{name}.git" python3 tools/fetch_deps.py
+        run: python3 tools/fetch_deps.py
 
       - name: Install h2spec
         run: |
