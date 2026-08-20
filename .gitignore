@@ -1,0 +1,16 @@
+# pixi environments
+.pixi/
+
+# build outputs
+build/
+*.mojopkg
+*.conda
+*.bin
+
+# fetched source dependencies
+.deps/
+
+# editor
+.DS_Store
+.vscode/
+.idea/

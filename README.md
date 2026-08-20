@@ -1,0 +1,71 @@
+# mojo-http2
+
+[![CI](https://github.com/nsalerni/mojo-http2/actions/workflows/ci.yml/badge.svg)](https://github.com/nsalerni/mojo-http2/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+HPACK header compression ([RFC 7541](https://www.rfc-editor.org/rfc/rfc7541))
+and HTTP/2 ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)) for
+**Mojo 1.0**. This repo holds two packages that version in lockstep:
+**hpack** (standard library only) and **h2** (depends on hpack +
+[mojo-net](https://github.com/nsalerni/mojo-net)).
+
+## hpack (`src/hpack`)
+
+`Encoder`, `Decoder`, dynamic table with eviction, Huffman coding with
+strict padding validation, and never-indexed handling for sensitive
+headers. The static header table and Huffman code table are generated from
+the RFC text by `tools/gen_hpack_tables.py` (`pixi run gen-hpack`) —
+nothing is hand-transcribed.
+
+Scope note: `HeaderField` stores names and values as `String`, so header
+values must be valid UTF-8. HTTP/2 permits arbitrary octets in field
+values; protocols that need them (gRPC uses base64 `-bin` metadata
+instead) would need a bytes-valued variant — tracked for a future release.
+
+## h2 (`src/h2`)
+
+HTTP/2 framing and connection state machine over blocking TCP: full frame
+codec, connection preface and SETTINGS negotiation, stream multiplexing
+with the §5.1 state machine, request-header validation (§8), flow control
+with consume-driven backpressure, and the standard abuse mitigations
+(rapid-reset accounting per CVE-2023-44487, PING/SETTINGS flood limits,
+concurrency and header-size caps).
+
+Errors follow §5.4: connection errors send GOAWAY with the correct code,
+stream errors send RST_STREAM and the connection continues. Single-threaded
+and caller-driven — callers pump `process_next_frame()`; there is no event
+loop yet (Mojo 1.0 has no public async or threads).
+
+## Verification
+
+- **h2spec: all 146 cases pass** (RFC 9113 + RFC 7541 sections).
+- Byte-exact on every RFC 7541 Appendix C vector; the encoder reproduces
+  the C.4 and C.6 example streams exactly.
+- Differential-tested against **python-hpack** in both directions
+  (including mid-stream dynamic table size updates and multibyte UTF-8
+  values), against **hyperframe** for byte-identical frame serialization,
+  and against a strict **hyper-h2** peer live in both roles.
+- The flood/abuse guards have dedicated unit tests (h2spec does not cover
+  them).
+
+Current results: [COMPLIANCE.md](COMPLIANCE.md) — CI regenerates the
+report on every push.
+
+```sh
+python3 tools/fetch_deps.py   # standalone checkout: fetch mojo-net source
+pixi run test                 # unit tests (hpack + h2)
+pixi run compliance           # differential + h2spec; rewrites COMPLIANCE.md
+pixi run bench                # HPACK/frame coding benchmarks
+```
+
+## Status
+
+Extracted from [grpc-mojo](https://github.com/nsalerni/grpc-mojo), where it
+carries that project's transport. Not yet implemented: TLS/ALPN (h2c only),
+PUSH_PROMISE (rejected per spec for our roles), priority scheduling
+(PRIORITY frames are validated and ignored).
+
+## License
+
+[Apache-2.0](LICENSE). Not affiliated with Modular; "Mojo" is a trademark
+of Modular Inc.

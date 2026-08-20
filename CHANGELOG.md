@@ -1,0 +1,15 @@
+# Changelog
+
+## 0.1.0 — 2026-08-19
+
+Initial release.
+
+- `hpack`: RFC 7541 encoder/decoder with dynamic table, generated
+  static/Huffman tables, strict Huffman padding validation, size updates,
+  and never-indexed (sensitive) fields. Byte-exact on all Appendix C
+  vectors; differential vs python-hpack.
+- `h2`: RFC 9113 frame codec and connection state machine over blocking
+  TCP — preface/SETTINGS, stream multiplexing, §8 request validation,
+  consume-driven flow control, GOAWAY/RST error signaling, and abuse
+  guards (rapid reset, control-frame floods, concurrency and header-size
+  caps). h2spec 146/146; live differential vs strict hyper-h2 both roles.

@@ -1,0 +1,8 @@
+{
+  "dir": ".deps",
+  "deps": {
+    "mojo-net": {
+      "ref": "main"
+    }
+  }
+}
