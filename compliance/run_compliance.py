@@ -45,6 +45,7 @@ CERTS = BUILD / "certs"
 
 RESULTS: dict[str, list[tuple[str, bool, str]]] = {}
 US = "\x1f"
+MOJO_RUN: list[str] = []
 
 
 def dep_path(name: str) -> Path:
@@ -76,25 +77,24 @@ def record(section: str, name: str, ok: bool, detail: str = ""):
 
 def run_tool(binary: str, *args, timeout=60) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [str(BUILD / binary), *map(str, args)],
+        [*MOJO_RUN, str(TOOLS / f"{binary}.mojo"), *map(str, args)],
         capture_output=True, text=True, timeout=timeout, cwd=ROOT,
     )
 
 
 def build_tools():
-    print("== building Mojo compliance tools ==")
+    global MOJO_RUN
+    print("== preparing Mojo compliance tools ==")
     BUILD.mkdir(exist_ok=True)
     net_src = dep_path("mojo-net")
     tls_src = dep_path("mojo-tls")
-    for src in sorted(TOOLS.glob("*.mojo")):
-        out = BUILD / src.stem
-        subprocess.run(
-            ["mojo", "build", "-I", "src", "-I", str(net_src),
-             "-I", str(tls_src), "-I", "test",
-             str(src.relative_to(ROOT)), "-o", str(out)],
-            check=True, cwd=ROOT,
-        )
-        print(f"  built {src.stem}")
+    # `mojo build` on the conda Linux toolchain does not link libdl for
+    # OwnedDLHandle users. `mojo run` does, and is also the invocation used
+    # by mojo-tls for its Linux compliance probes.
+    MOJO_RUN = [
+        "mojo", "run", "-I", "src", "-I", str(net_src),
+        "-I", str(tls_src), "-I", "test",
+    ]
 
 
 # ---------------------------------------------------------------- hpack ---
@@ -389,7 +389,10 @@ def section_h2_live(tmp: Path):
 
     # Reference client against our server.
     import h2.connection, h2.config, h2.events
-    proc = subprocess.Popen([str(BUILD / "h2_server_probe")], stdout=subprocess.PIPE, text=True, cwd=ROOT)
+    proc = subprocess.Popen(
+        [*MOJO_RUN, str(TOOLS / "h2_server_probe.mojo")],
+        stdout=subprocess.PIPE, text=True, cwd=ROOT,
+    )
     try:
         port = int(proc.stdout.readline().strip().split(" ")[-1].replace("PORT", "").strip() or
                    re.search(r"\d+", "0").group())
@@ -495,7 +498,8 @@ def section_h2_tls(tmp: Path):
     # to our server.
     proc = subprocess.Popen(
         [
-            str(BUILD / "h2_server_probe"),
+            *MOJO_RUN,
+            str(TOOLS / "h2_server_probe.mojo"),
             str(CERTS / "server.pem"),
             str(CERTS / "server.key"),
         ],
@@ -605,11 +609,13 @@ def section_h2_tls(tmp: Path):
 
     proc = subprocess.Popen(
         [
-            str(BUILD / "h2_server_probe"),
+            *MOJO_RUN,
+            str(TOOLS / "h2_server_probe.mojo"),
             str(CERTS / "server.pem"),
             str(CERTS / "server.key"),
         ],
         stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
         cwd=ROOT,
     )
@@ -646,7 +652,7 @@ def section_h2spec(tmp: Path):
                False, "h2spec binary not found on PATH")
         return
     for use_tls in (False, True):
-        server_args = [str(BUILD / "h2spec_server")]
+        server_args = [*MOJO_RUN, str(TOOLS / "h2spec_server.mojo")]
         h2spec_args = [h2spec_bin, "-h", "127.0.0.1"]
         if use_tls:
             server_args += [
