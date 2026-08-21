@@ -2,10 +2,10 @@
   "dir": ".deps",
   "deps": {
     "mojo-net": {
-      "ref": "main"
+      "ref": "v0.2.0"
     },
     "mojo-tls": {
-      "ref": "main"
+      "ref": "v0.2.0"
     }
   }
 }

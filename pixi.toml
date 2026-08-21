@@ -1,11 +1,7 @@
 # mojo-http2: HPACK (RFC 7541) and HTTP/2 (RFC 9113) for Mojo 1.0.
 #
-# This repo publishes TWO packages: mojo-hpack (src/hpack, stdlib-only) and
-# mojo-h2 (src/h2, depends on mojo-hpack + mojo-net + mojo-tls). Inside
-# the grpc-mojo monorepo this manifest is a self-contained dev workspace;
-# per-package
-# [package] manifests are finalized at publish time
-# (see ../../docs/PACKAGING.md).
+# The mojo-http2 distribution contains both public modules: hpack is
+# standalone, while h2 depends on hpack, mojo-net, and mojo-tls.
 
 [workspace]
 channels = ["https://conda.modular.com/max", "conda-forge"]
@@ -25,12 +21,20 @@ compliance = { cmd = "python3 compliance/run_compliance.py", depends-on = ["prep
 bench = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS bench/bench_http2.mojo"
 bench-smoke = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS bench/bench_http2.mojo --smoke"
 gen-hpack = "python3 tools/gen_hpack_tables.py"
+package-test = "python3 packaging/test_installed_package.py"
 
 [dependencies]
 mojo = ">=1.0.0,<2"
 python = ">=3.11"
 openssl = ">=3"
 c-compiler = "*"
+
+[package]
+name = "mojo-http2"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "0.*" }
 
 [pypi-dependencies]
 hpack = ">=4.0"
