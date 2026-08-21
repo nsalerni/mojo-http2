@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [macos-14, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -28,8 +28,12 @@ jobs:
 
       - name: Install h2spec
         run: |
-          curl -sL https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_linux_amd64.tar.gz | tar xz
-          sudo mv h2spec /usr/local/bin/
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install h2spec
+          else
+            curl -sL https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_linux_amd64.tar.gz | tar xz
+            sudo mv h2spec /usr/local/bin/
+          fi
 
       - name: Docstring coverage (mojo doc gate)
         run: |
