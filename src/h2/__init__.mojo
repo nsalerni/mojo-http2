@@ -19,8 +19,8 @@ specializes the same connection over mojo-tls.
 
 Depends on `hpack`, `net`, and `tls`; extractable as a standalone package.
 The design is single-threaded and caller-driven: there is no event loop;
-callers pump the connection by calling `Http2Connection.process_next_frame`
-(directly or via the `wait_*` helpers) until the state they need appears.
+callers can dispatch decoded frames with `Http2Connection.process_frame`, or
+pump a blocking stream with `process_next_frame` and the `wait_*` helpers.
 
 Conformance is verified with h2spec in cleartext and TLS modes.
 """

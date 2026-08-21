@@ -42,6 +42,13 @@ header or payload between calls and rejects an oversized declared length as
 soon as the nine-byte header is complete. This is the framing primitive for
 readiness-driven transports; connection dispatch remains caller-driven.
 
+`Http2Connection.process_frame` validates and dispatches one complete frame
+without reading from the transport. Fragmented header blocks remain in
+connection state until END_HEADERS, with a configurable compressed-block
+and continuation-count limit. `process_next_frame` remains the blocking
+compatibility API and still reads through a complete HEADERS plus CONTINUATION
+sequence. Automatic protocol responses continue to use blocking writes.
+
 Errors follow §5.4: connection errors send GOAWAY with the correct code,
 stream errors send RST_STREAM and the connection continues. The
 single-threaded, caller-driven API is the same over h2c, Unix sockets, and
@@ -60,6 +67,8 @@ peer that does not negotiate it.
 - Incremental frame decoding is checked against hyperframe bytes at every
   split point, one byte at a time, as coalesced input, and with seeded
   fragmentation of a 16 KiB DATA frame.
+- Direct frame dispatch is checked against hyper-h2 for fragmented header
+  blocks, HPACK dynamic state, and illegal CONTINUATION sequences.
 - TLS transport is checked in both roles against **CPython ssl**, including
   certificate verification, `h2` ALPN selection, and ALPN rejection.
 - The flood/abuse guards have dedicated unit tests (h2spec does not cover
