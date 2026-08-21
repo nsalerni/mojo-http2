@@ -19,7 +19,7 @@ from std.sys import argv
 
 from hpack import Decoder, Encoder, HeaderField
 from hpack.huffman import HuffmanTree, huffman_encode
-from h2.frame import FrameHeader
+from h2.frame import FrameHeader, IncrementalFrameDecoder
 
 
 def is_smoke() -> Bool:
@@ -177,5 +177,83 @@ def main() raises:
 
     r = run_capped(frame_roundtrip, secs)
     report_line("frame header serialize+parse", r, 9)
+
+    # Incremental decoder over 1 MiB of prebuilt DATA frames. Both paths
+    # decode identical bytes; the chunked case models readiness-driven reads.
+    var frame_count = 64
+    var frame_payload_len = 16384
+    var incremental_wire = List[Byte](
+        capacity=frame_count * (9 + frame_payload_len)
+    )
+    var fixed_header = List[Byte]()
+    fixed_header.append(0x00)
+    fixed_header.append(0x40)
+    fixed_header.append(0x00)
+    fixed_header.append(0x00)
+    fixed_header.append(0x00)
+    fixed_header.append(0x00)
+    fixed_header.append(0x00)
+    fixed_header.append(0x00)
+    fixed_header.append(0x01)
+    for _ in range(frame_count):
+        incremental_wire.extend(Span(fixed_header))
+        for i in range(frame_payload_len):
+            incremental_wire.append(UInt8(i % 251))
+    var expected_checksum = 0
+    for i in range(frame_payload_len):
+        expected_checksum += i % 251
+    expected_checksum *= frame_count
+
+    def decode_single_chunk() raises {
+        incremental_wire, frame_count, expected_checksum
+    }:
+        var decoder = IncrementalFrameDecoder()
+        var frames = decoder.feed(Span(incremental_wire))
+        var checksum = 0
+        for i in range(len(frames)):
+            for byte in frames[i].payload:
+                checksum += Int(byte)
+        if (
+            len(frames) != frame_count
+            or decoder.buffered_len() != 0
+            or checksum != expected_checksum
+        ):
+            raise Error("incremental single-chunk decode mismatch")
+
+    r = run_capped(decode_single_chunk, secs)
+    report_line(
+        "incremental frame decode and scan (single chunk)",
+        r,
+        len(incremental_wire),
+    )
+
+    def decode_4k_chunks() raises {
+        incremental_wire, frame_count, expected_checksum
+    }:
+        var decoder = IncrementalFrameDecoder()
+        var offset = 0
+        var decoded = 0
+        var checksum = 0
+        while offset < len(incremental_wire):
+            var end = min(offset + 4096, len(incremental_wire))
+            var frames = decoder.feed(Span(incremental_wire)[offset:end])
+            decoded += len(frames)
+            for i in range(len(frames)):
+                for byte in frames[i].payload:
+                    checksum += Int(byte)
+            offset = end
+        if (
+            decoded != frame_count
+            or decoder.buffered_len() != 0
+            or checksum != expected_checksum
+        ):
+            raise Error("incremental 4 KiB decode mismatch")
+
+    r = run_capped(decode_4k_chunks, secs)
+    report_line(
+        "incremental frame decode and scan (4 KiB chunks)",
+        r,
+        len(incremental_wire),
+    )
 
     print("bench_http2: done")

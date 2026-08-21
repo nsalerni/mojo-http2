@@ -10,11 +10,11 @@
 
 """HTTP/2 frame layer ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113) §4).
 
-Defines the wire-level constants — frame types (§6), frame flags (§6),
-error codes (§7), and settings identifiers (§6.5.2) — plus the 9-byte
+Defines the wire-level constants, frame types (§6), frame flags (§6),
+error codes (§7), and settings identifiers (§6.5.2), plus the 9-byte
 `FrameHeader` codec, the `Frame` header/payload pair, the `Settings`
-bookkeeping struct, and the big-endian integer helpers the rest of the
-package builds on.
+bookkeeping struct, an incremental frame decoder, and the big-endian
+integer helpers the rest of the package builds on.
 """
 
 comptime FRAME_HEADER_LEN = 9
@@ -290,6 +290,120 @@ struct Frame(Movable, Writable):
             writer: The writer to receive the formatted frame.
         """
         writer.write(self.header)
+
+
+struct IncrementalFrameDecoder(Movable):
+    """Decodes complete HTTP/2 frames from arbitrarily split input.
+
+    `feed` accepts partial headers, partial payloads, multiple coalesced
+    frames, and empty input. Complete frames are returned in wire order.
+    Only an incomplete frame is retained between calls: at most eight header
+    bytes before the header is known, then fewer than `max_frame_size`
+    payload bytes. A declared length over the configured limit fails as soon
+    as its nine-byte header is complete, before any payload is retained.
+
+    A size-limit error is terminal for the decoder. This keeps the caller
+    from treating bytes after a rejected header as a new frame boundary.
+    """
+
+    var _max_frame_size: Int
+    """Largest accepted frame payload in bytes."""
+    var _header_bytes: List[Byte]
+    """Incomplete wire header, always shorter than nine bytes."""
+    var _pending_header: Optional[FrameHeader]
+    """Parsed header for the payload currently being collected."""
+    var _payload: List[Byte]
+    """Incomplete payload for `_pending_header`."""
+    var _failed: Bool
+    """True after a terminal size-limit error."""
+
+    def __init__(out self, max_frame_size: Int = DEFAULT_MAX_FRAME_SIZE) raises:
+        """Creates a decoder with a payload-size limit.
+
+        Args:
+            max_frame_size: Largest frame payload to accept. Must be between
+                zero and the 24-bit HTTP/2 frame-length maximum.
+
+        Raises:
+            If `max_frame_size` is outside the wire format's range.
+        """
+        if max_frame_size < 0 or max_frame_size > 0xFFFFFF:
+            raise Error("h2: invalid incremental frame size limit")
+        self._max_frame_size = max_frame_size
+        self._header_bytes = List[Byte](capacity=FRAME_HEADER_LEN)
+        self._pending_header = None
+        self._payload = List[Byte]()
+        self._failed = False
+
+    def _fail_size(mut self) raises:
+        """Marks the decoder failed, releases retained bytes, and raises."""
+        self._failed = True
+        self._header_bytes.clear()
+        self._pending_header = None
+        self._payload.clear()
+        raise Error("h2: frame exceeds incremental decoder limit")
+
+    def feed(mut self, data: Span[Byte, _]) raises -> List[Frame]:
+        """Consumes available bytes and returns every completed frame.
+
+        Args:
+            data: The next contiguous bytes from the HTTP/2 byte stream.
+
+        Returns:
+            Complete frames decoded by this call, in wire order. An empty
+            list means more bytes are needed.
+
+        Raises:
+            If a frame declares a payload larger than `max_frame_size`, or
+            if the decoder was already failed by such a frame.
+        """
+        if self._failed:
+            raise Error("h2: incremental frame decoder is failed")
+
+        var out = List[Frame]()
+        var offset = 0
+        while offset < len(data):
+            if not self._pending_header:
+                var needed = FRAME_HEADER_LEN - len(self._header_bytes)
+                var take = min(needed, len(data) - offset)
+                self._header_bytes.extend(data[offset : offset + take])
+                offset += take
+                if len(self._header_bytes) < FRAME_HEADER_LEN:
+                    break
+
+                var header = FrameHeader.parse(Span(self._header_bytes))
+                self._header_bytes.clear()
+                if header.length > self._max_frame_size:
+                    self._fail_size()
+                if header.length == 0:
+                    out.append(Frame(header=header, payload=List[Byte]()))
+                    continue
+                self._pending_header = header
+
+            var header = self._pending_header.value()
+            var remaining = header.length - len(self._payload)
+            var take = min(remaining, len(data) - offset)
+            self._payload.extend(data[offset : offset + take])
+            offset += take
+            if len(self._payload) < header.length:
+                break
+
+            var payload = self._payload^
+            self._payload = List[Byte]()
+            self._pending_header = None
+            out.append(Frame(header=header, payload=payload^))
+
+        return out^
+
+    def buffered_len(self) -> Int:
+        """Returns incomplete wire bytes retained for the next call.
+
+        Parsed header fields use fixed storage and are not counted.
+
+        Returns:
+            Incomplete header or payload bytes retained by the decoder.
+        """
+        return len(self._header_bytes) + len(self._payload)
 
 
 @fieldwise_init

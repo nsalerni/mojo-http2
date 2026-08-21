@@ -62,6 +62,7 @@ from .frame import (
     FRAME_WINDOW_UPDATE,
     Frame,
     FrameHeader,
+    IncrementalFrameDecoder,
     Settings,
     get_u16_be,
     get_u24_be,

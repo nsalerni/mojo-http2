@@ -36,6 +36,12 @@ with consume-driven backpressure, and the standard abuse mitigations
 (rapid-reset accounting per CVE-2023-44487, PING/SETTINGS flood limits,
 concurrency and header-size caps).
 
+`IncrementalFrameDecoder` accepts arbitrarily split or coalesced wire bytes
+and returns complete `Frame` values in order. It retains only the incomplete
+header or payload between calls and rejects an oversized declared length as
+soon as the nine-byte header is complete. This is the framing primitive for
+readiness-driven transports; connection dispatch remains caller-driven.
+
 Errors follow §5.4: connection errors send GOAWAY with the correct code,
 stream errors send RST_STREAM and the connection continues. The
 single-threaded, caller-driven API is the same over h2c, Unix sockets, and
@@ -51,6 +57,9 @@ peer that does not negotiate it.
   (including mid-stream dynamic table size updates and multibyte UTF-8
   values), against **hyperframe** for byte-identical frame serialization,
   and against a strict **hyper-h2** peer live in both roles.
+- Incremental frame decoding is checked against hyperframe bytes at every
+  split point, one byte at a time, as coalesced input, and with seeded
+  fragmentation of a 16 KiB DATA frame.
 - TLS transport is checked in both roles against **CPython ssl**, including
   certificate verification, `h2` ALPN selection, and ALPN rejection.
 - The flood/abuse guards have dedicated unit tests (h2spec does not cover
