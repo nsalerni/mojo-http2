@@ -140,7 +140,7 @@ def main() -> None:
         add_channels(build_command, channel)
         run(build_command, PACKAGE_BUILD_TIMEOUT_SECONDS)
 
-        package = one_package(output, "mojo-http2-0.1.0-*.conda", "mojo-http2 0.1.0")
+        package = one_package(output, "mojo-http2-0.2.0-*.conda", "mojo-http2 0.2.0")
 
         test_command = [
             "pixi",

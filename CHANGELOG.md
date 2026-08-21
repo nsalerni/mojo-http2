@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-08-20
+
 - Added `H2TLSContext` for HTTP/2 over mojo-tls with mandatory `h2` ALPN.
 - Added TLS coverage against CPython ssl, hyper-h2, and all 146 h2spec cases.
+- Added an installable package containing the compiled `hpack` and `h2`
+  modules, verified from clean prefixes on macOS and Linux.
 
 ## 0.1.0 - 2026-08-19
 
