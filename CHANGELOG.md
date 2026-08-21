@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-08-20
+
 - Added bounded incremental HTTP/2 frame decoding for split and coalesced
   transport input, differential-tested against hyperframe.
+- Made the TLS functional test complete graceful HTTP/2 shutdown before
+  closing the transport.
+- Expanded the full test and compliance matrix to macOS and Linux.
 
 ## 0.2.0 - 2026-08-20
 
