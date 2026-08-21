@@ -4,7 +4,7 @@
 from std.ffi import c_int, external_call
 from std.testing import assert_equal
 
-from h2 import H2TLSContext
+from h2 import ERR_NO_ERROR, H2TLSContext
 from hpack import HeaderField
 from net import TCPListener, TCPStream
 
@@ -38,6 +38,9 @@ def serve_one(listener: TCPListener) raises:
     var headers = [hf(":status", "200"), hf("content-type", "text/plain")]
     conn.send_headers(sid, Span(headers), end_stream=False)
     conn.send_data(sid, Span(body), end_stream=True)
+    while not Bool(conn.goaway_code):
+        conn.process_next_frame()
+    assert_equal(conn.goaway_code.value(), ERR_NO_ERROR)
     conn.close()
 
 
@@ -74,6 +77,7 @@ def test_request_response_over_tls() raises:
     var echoed = conn.take_data(sid, body.byte_length())
     assert_equal(String(from_utf8=echoed), body)
     conn.wait_stream_end(sid)
+    conn.send_goaway(ERR_NO_ERROR)
     conn.close()
 
     var status = c_int(0)
