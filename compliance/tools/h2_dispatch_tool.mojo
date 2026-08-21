@@ -114,6 +114,8 @@ def main() raises:
             if not active:
                 raise Error("END outside CASE")
             output += emit_state(conn)
+            var pending = conn.take_pending_output()
+            output += "OUT " + to_hex(Span(pending)) + "\n"
             if failed:
                 output += "ERROR " + failure + "\n"
             output += (

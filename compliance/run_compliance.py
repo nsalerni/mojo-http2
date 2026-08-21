@@ -477,6 +477,12 @@ def section_h2_dispatch(tmp: Path):
     block = response_block(encoder, "one")
     cases.append(("complete", 1, split_headers(1, block, [])))
 
+    cases.append((
+        "ping-ack",
+        0,
+        [hf.PingFrame(0, opaque_data=b"12345678")],
+    ))
+
     encoder = hpack.Encoder()
     first = response_block(encoder, "one")
     second = response_block(encoder, "two")
@@ -529,9 +535,10 @@ def section_h2_dispatch(tmp: Path):
             stream_id: {"headers": [], "headers_done": False, "end": False}
             for stream_id in stream_ids
         }
+        outbound = bytearray()
         try:
             conn.receive_data(settings)
-            conn.data_to_send()
+            outbound += conn.data_to_send()
             for frame in frames:
                 for event in conn.receive_data(frame.serialize()):
                     if isinstance(event, h2.events.ResponseReceived):
@@ -541,9 +548,35 @@ def section_h2_dispatch(tmp: Path):
                         state[event.stream_id]["headers_done"] = True
                     elif isinstance(event, h2.events.StreamEnded):
                         state[event.stream_id]["end"] = True
-            return "OK", state
+                outbound += conn.data_to_send()
+            return "OK", state, bytes(outbound)
         except h2.exceptions.ProtocolError:
-            return "ERROR", state
+            outbound += conn.data_to_send()
+            return "ERROR", state, bytes(outbound)
+
+    def output_signatures(data):
+        signatures = []
+        offset = 0
+        while offset < len(data):
+            if len(data) - offset < 9:
+                raise ValueError("short queued frame header")
+            length = int.from_bytes(data[offset:offset + 3], "big")
+            total = 9 + length
+            if len(data) - offset < total:
+                raise ValueError("short queued frame payload")
+            frame_type = data[offset + 3]
+            flags = data[offset + 4]
+            stream_id = int.from_bytes(
+                data[offset + 5:offset + 9], "big"
+            ) & 0x7FFFFFFF
+            payload = data[offset + 9:offset + total]
+            # GOAWAY debug data is implementation-specific. Compare the
+            # last stream id and error code, which are the protocol fields.
+            if frame_type == 7:
+                payload = payload[:8]
+            signatures.append((frame_type, flags, stream_id, payload))
+            offset += total
+        return signatures
 
     infile = tmp / "h2d_in.txt"
     outfile = tmp / "h2d_out.txt"
@@ -577,6 +610,8 @@ def section_h2_dispatch(tmp: Path):
                     "error": "",
                     "result": "",
                     "goaway": False,
+                    "output": b"",
+                    "output_seen": False,
                 }
             elif line.startswith("S ") and current is not None:
                 _, sid, headers_done, ended = line.split()
@@ -596,7 +631,20 @@ def section_h2_dispatch(tmp: Path):
                 )
             elif line.startswith("ERROR ") and current is not None:
                 current["error"] = line[6:]
+            elif line.startswith("OUT ") and current is not None:
+                if current["output_seen"]:
+                    parse_ok = False
+                    break
+                try:
+                    current["output"] = bytes.fromhex(line[4:])
+                    current["output_seen"] = True
+                except ValueError:
+                    parse_ok = False
+                    break
             elif line.startswith("END ") and current is not None:
+                if not current["output_seen"]:
+                    parse_ok = False
+                    break
                 _, status, goaway = line.split()
                 current["result"] = status
                 current["goaway"] = goaway == "True"
@@ -618,7 +666,7 @@ def section_h2_dispatch(tmp: Path):
         ok = tool_ok
         why = detail
         for name in names:
-            expected_result, expected_streams = expected[name]
+            expected_result, expected_streams, expected_output = expected[name]
             actual = parsed.get(name, {})
             if actual.get("result") != expected_result:
                 ok = False
@@ -638,6 +686,20 @@ def section_h2_dispatch(tmp: Path):
                 ok = False
                 why = f"{name}: protocol error did not send GOAWAY"
                 break
+            try:
+                want_output = output_signatures(expected_output)
+                got_output = output_signatures(actual.get("output", b""))
+            except ValueError as error:
+                ok = False
+                why = f"{name}: malformed queued output: {error}"
+                break
+            if got_output != want_output:
+                ok = False
+                why = (
+                    f"{name}: queued output mismatch: "
+                    f"want {want_output} got {got_output}"
+                )
+                break
         record("h2", label, ok, why)
 
     record_cases(
@@ -649,8 +711,91 @@ def section_h2_dispatch(tmp: Path):
         ["dynamic-two-streams"],
     )
     record_cases(
+        "process_frame queues SETTINGS and PING acknowledgements matching hyper-h2",
+        ["ping-ack"],
+    )
+    record_cases(
         "process_frame matches hyper-h2 rejection of illegal CONTINUATION sequences",
         ["interleaved-ping", "wrong-continuation-stream", "stray-continuation"],
+    )
+
+
+def section_h2_output_queue(tmp: Path):
+    print("== queued h2 output vs hyper-h2 ==")
+    import h2.config
+    import h2.connection
+    import h2.events
+
+    outfile = tmp / "h2q_out.txt"
+    result = run_tool("h2_output_tool", outfile, timeout=120)
+    ok = result.returncode == 0
+    detail = result.stderr[:300]
+    lines = outfile.read_text().splitlines() if ok and outfile.exists() else []
+    if len(lines) != 2:
+        ok = False
+        detail = detail or "queued output probe emitted malformed output"
+
+    consumed = 0
+    wire = b""
+    if ok:
+        try:
+            consumed = int(lines[0])
+            wire = bytes.fromhex(lines[1])
+        except ValueError as error:
+            ok = False
+            detail = f"queued output probe parse failed: {error}"
+
+    if ok:
+        client = h2.connection.H2Connection(config=h2.config.H2Configuration(
+            client_side=True, header_encoding="utf-8"
+        ))
+        client.initiate_connection()
+        client_preface = client.data_to_send()
+
+        server = h2.connection.H2Connection(config=h2.config.H2Configuration(
+            client_side=False, header_encoding="utf-8"
+        ))
+        server.initiate_connection()
+        server.data_to_send()
+        headers = []
+        body = bytearray()
+        ended = False
+        try:
+            for event in server.receive_data(client_preface + wire):
+                if isinstance(event, h2.events.RequestReceived):
+                    headers = list(event.headers)
+                elif isinstance(event, h2.events.DataReceived):
+                    body += event.data
+                elif isinstance(event, h2.events.StreamEnded):
+                    ended = True
+        except Exception as error:
+            ok = False
+            detail = f"hyper-h2 rejected queued bytes: {error!r}"
+        expected_headers = [
+            (":method", "POST"),
+            (":scheme", "https"),
+            (":path", "/queue.Test/Stream"),
+            (":authority", "localhost"),
+            ("content-type", "application/grpc"),
+        ]
+        expected_body = bytes(i % 251 for i in range(20000))
+        if ok and (
+            consumed != 20000
+            or headers != expected_headers
+            or bytes(body) != expected_body
+            or not ended
+        ):
+            ok = False
+            detail = (
+                f"state mismatch: consumed={consumed} headers={headers} "
+                f"body={len(body)} ended={ended}"
+            )
+
+    record(
+        "h2",
+        "queued HEADERS and flow-controlled DATA are accepted by hyper-h2",
+        ok,
+        detail,
     )
 
 
@@ -1286,6 +1431,7 @@ def main() -> int:
         section_h2_frames(tmp)
         section_h2_incremental(tmp)
         section_h2_dispatch(tmp)
+        section_h2_output_queue(tmp)
         section_h2_live(tmp)
         section_h2_tls(tmp)
         section_h2spec(tmp)

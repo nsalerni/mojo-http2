@@ -47,7 +47,18 @@ without reading from the transport. Fragmented header blocks remain in
 connection state until END_HEADERS, with a configurable compressed-block
 and continuation-count limit. `process_next_frame` remains the blocking
 compatibility API and still reads through a complete HEADERS plus CONTINUATION
-sequence. Automatic protocol responses continue to use blocking writes.
+sequence. Automatic protocol responses enter a bounded outbound FIFO without
+touching the transport.
+
+The `queue_headers`, `queue_data`, `queue_ping`, `queue_rst_stream`, and
+`queue_goaway` APIs serialize output without transport I/O. `queue_data`
+returns the number of bytes admitted by the current connection and stream
+flow-control windows. Readiness-driven callers take queued bytes with
+`take_pending_output`; blocking callers keep using the existing `send_*`
+methods, which flush the same FIFO through `IOStream.write_all`.
+`take_buffered_data` consumes receive bytes and queues stream-level
+WINDOW_UPDATE without reading or writing; `take_data` remains its blocking
+compatibility wrapper.
 
 Errors follow §5.4: connection errors send GOAWAY with the correct code,
 stream errors send RST_STREAM and the connection continues. The
@@ -69,6 +80,8 @@ peer that does not negotiate it.
   fragmentation of a 16 KiB DATA frame.
 - Direct frame dispatch is checked against hyper-h2 for fragmented header
   blocks, HPACK dynamic state, and illegal CONTINUATION sequences.
+- Queued automatic responses are compared with hyper-h2, and hyper-h2 consumes
+  queued HEADERS plus flow-controlled DATA as an independent wire oracle.
 - TLS transport is checked in both roles against **CPython ssl**, including
   certificate verification, `h2` ALPN selection, and ALPN rejection.
 - The flood/abuse guards have dedicated unit tests (h2spec does not cover
