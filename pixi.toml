@@ -7,7 +7,7 @@
 channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "mojo-http2"
 platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
-version = "0.1.0"
+version = "0.2.0"
 license = "Apache-2.0"
 preview = ["pixi-build"]
 
@@ -31,7 +31,7 @@ c-compiler = "*"
 
 [package]
 name = "mojo-http2"
-version = "0.1.0"
+version = "0.2.0"
 
 [package.build]
 backend = { name = "pixi-build-rattler-build", version = "0.*" }
