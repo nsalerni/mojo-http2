@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added bounded incremental HTTP/2 frame decoding for split and coalesced
+  transport input, differential-tested against hyperframe.
+
 ## 0.2.0 - 2026-08-20
 
 - Added `H2TLSContext` for HTTP/2 over mojo-tls with mandatory `h2` ALPN.

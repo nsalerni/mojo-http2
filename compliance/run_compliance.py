@@ -296,6 +296,137 @@ def section_h2_frames(tmp: Path):
     record("h2", f"byte-identical frame serialization vs hyperframe ({len(frames)} cases)", ok, detail)
 
 
+def section_h2_incremental(tmp: Path):
+    print("== incremental h2 frame decoding vs hyperframe ==")
+    import hyperframe.frame as hf
+
+    frames = [
+        hf.DataFrame(1, data=b"hello", flags=["END_STREAM"]),
+        hf.HeadersFrame(3, data=b"\x82\x86", flags=["END_HEADERS"]),
+        hf.SettingsFrame(0, settings={hf.SettingsFrame.MAX_FRAME_SIZE: 65536}),
+        hf.PingFrame(0, opaque_data=b"12345678"),
+        hf.WindowUpdateFrame(7, window_increment=100000),
+        hf.GoAwayFrame(0, last_stream_id=7, error_code=2, additional_data=b"bye"),
+        hf.ContinuationFrame(3, data=b"\x84", flags=["END_HEADERS"]),
+    ]
+    raw_frames = [f.serialize() for f in frames]
+
+    def expected_frame(raw: bytes) -> str:
+        length = int.from_bytes(raw[0:3], "big")
+        stream_id = int.from_bytes(raw[5:9], "big") & 0x7FFFFFFF
+        return f"F {raw[3]} {raw[4]} {stream_id} {length} {raw[9:].hex()}"
+
+    cases: list[tuple[str, list[bytes], list[bytes], int]] = []
+    short = raw_frames[0]
+    for split in range(len(short) + 1):
+        cases.append(
+            (f"split-{split}", [short[:split], short[split:]], [short], 0)
+        )
+
+    combined = b"".join(raw_frames)
+    cases.append(
+        (
+            "one-byte",
+            [combined[i : i + 1] for i in range(len(combined))],
+            raw_frames,
+            0,
+        )
+    )
+    cases.append(("coalesced", [combined], raw_frames, 0))
+
+    large_frame = hf.DataFrame(
+        9, data=bytes(i % 251 for i in range(16384)), flags=["END_STREAM"]
+    ).serialize()
+    rng = random.Random(9113)
+    chunks = []
+    offset = 0
+    while offset < len(large_frame):
+        size = rng.randint(1, 4096)
+        chunks.append(large_frame[offset : offset + size])
+        offset += size
+    cases.append(("seeded-large", chunks, [large_frame], 0))
+
+    incomplete = raw_frames[0] + raw_frames[3][:7]
+    cases.append(("incomplete-suffix", [incomplete], [raw_frames[0]], 7))
+
+    infile = tmp / "h2i_in.txt"
+    outfile = tmp / "h2i_out.txt"
+    lines = []
+    for name, chunks, _, _ in cases:
+        lines.append(f"CASE {name}")
+        lines.extend(chunk.hex() for chunk in chunks if chunk)
+        lines.append("END")
+    infile.write_text("\n".join(lines) + "\n")
+    r = run_tool("h2_incremental_tool", infile, outfile, timeout=120)
+    tool_ok = r.returncode == 0
+    detail = r.stderr[:300]
+    got: dict[str, tuple[list[str], int]] = {}
+    parse_ok = True
+    if tool_ok:
+        current = ""
+        decoded: list[str] = []
+        for line in outfile.read_text().splitlines():
+            if line.startswith("CASE "):
+                if current:
+                    parse_ok = False
+                current = line[5:]
+                decoded = []
+            elif line.startswith("F "):
+                if not current:
+                    parse_ok = False
+                decoded.append(line)
+            elif line.startswith("END "):
+                if not current or current in got:
+                    parse_ok = False
+                got[current] = (decoded.copy(), int(line[4:]))
+                current = ""
+            else:
+                parse_ok = False
+        if current:
+            parse_ok = False
+        want_cases = sorted(case[0] for case in cases)
+        if sorted(got) != want_cases:
+            parse_ok = False
+        if not parse_ok:
+            tool_ok = False
+            detail = "incremental probe emitted malformed case output"
+
+    def case_ok(name: str, members):
+        if not members:
+            record("h2", name, False, "compliance case selection was empty")
+            return
+        ok = tool_ok
+        why = detail
+        for case_name, _, expected, buffered in members:
+            want = ([expected_frame(raw) for raw in expected], buffered)
+            if got.get(case_name) != want:
+                ok = False
+                why = f"{case_name}: want {want} got {got.get(case_name)}"
+                break
+        record("h2", name, ok, why)
+
+    case_ok(
+        f"incremental decode at every split point ({len(short) + 1} plans)",
+        [case for case in cases if case[0].startswith("split-")],
+    )
+    case_ok(
+        f"one-byte chunks preserve {len(raw_frames)} hyperframe frames",
+        [case for case in cases if case[0] == "one-byte"],
+    )
+    case_ok(
+        f"coalesced input preserves {len(raw_frames)} hyperframe frames",
+        [case for case in cases if case[0] == "coalesced"],
+    )
+    case_ok(
+        "seeded fragmentation of a 16 KiB hyperframe DATA frame",
+        [case for case in cases if case[0] == "seeded-large"],
+    )
+    case_ok(
+        "incomplete hyperframe suffix is retained without early output",
+        [case for case in cases if case[0] == "incomplete-suffix"],
+    )
+
+
 def h2_reference_echo_server(
     sock: socket.socket, result: dict, tls_context: ssl.SSLContext | None = None
 ):
@@ -846,7 +977,11 @@ HTML_SECTIONS = {
     "hpack": ("`hpack` vs python-hpack",
               "Sequential header blocks encoded by one implementation and decoded by the other, in both directions, with dynamic-table state carried across blocks, mid-stream size updates, and multibyte UTF-8 values."),
     "h2": ("`h2` vs hyper-h2 / hyperframe / h2spec",
-           "Frame codec cross-checked byte-for-byte against hyperframe in both directions. Live connections run against hyper-h2, which raises ProtocolError on any protocol violation by the peer. h2spec runs its full RFC 9113/7541 suite against our server."),
+           "Frame codec cross-checked byte-for-byte against hyperframe in both "
+           "directions, including split, coalesced, and seeded-fragment input. "
+           "Live connections run against hyper-h2, which raises ProtocolError "
+           "on any protocol violation by the peer. h2spec runs its full RFC "
+           "9113/7541 suite against our server."),
     "h2_tls": ("`h2` over TLS vs CPython ssl / hyper-h2 / h2spec",
                "Both HTTP/2 roles run through verified CPython TLS peers and strict hyper-h2 state machines. ALPN omission and mismatch are rejected. h2spec repeats its complete run over TLS."),
 }
@@ -922,6 +1057,7 @@ def main() -> int:
         tmp = Path(tmp_s)
         section_hpack(tmp)
         section_h2_frames(tmp)
+        section_h2_incremental(tmp)
         section_h2_live(tmp)
         section_h2_tls(tmp)
         section_h2spec(tmp)
