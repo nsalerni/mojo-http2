@@ -212,6 +212,24 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     """Our advertised limit on concurrent peer-initiated streams."""
     var max_header_list_size: Int
     """Our limit on the uncompressed size of a received header list."""
+    var max_header_block_size: Int
+    """Our limit on compressed bytes retained across a header block."""
+    var max_header_continuations: Int
+    """Our limit on CONTINUATION frames in one header block."""
+    var _pending_header_stream: UInt32
+    """Stream whose fragmented header block is awaiting CONTINUATION."""
+    var _pending_header_flags: UInt8
+    """Flags from the HEADERS frame that opened the pending block."""
+    var _pending_header_block: List[Byte]
+    """Compressed fragments retained until END_HEADERS arrives."""
+    var _pending_header_is_new: Bool
+    """Whether the pending block opens a new stream."""
+    var _pending_header_peer_initiated: Bool
+    """Whether the pending block belongs to a peer-initiated stream."""
+    var _pending_header_self_dependency: Bool
+    """Whether the pending HEADERS priority depends on its own stream."""
+    var _pending_header_continuations: Int
+    """CONTINUATION frames received for the pending header block."""
 
     def __init__(out self, var stream: Self.S, *, is_client: Bool) raises:
         """Performs the connection preface exchange and sends our SETTINGS.
@@ -253,6 +271,15 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.control_frames = 0
         self.max_concurrent_streams = 256
         self.max_header_list_size = 16384
+        self.max_header_block_size = 65536
+        self.max_header_continuations = 1024
+        self._pending_header_stream = 0
+        self._pending_header_flags = 0
+        self._pending_header_block = List[Byte]()
+        self._pending_header_is_new = False
+        self._pending_header_peer_initiated = False
+        self._pending_header_self_dependency = False
+        self._pending_header_continuations = 0
         self.stream.set_nodelay(True)
 
         var our = List[Byte]()
@@ -306,7 +333,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         var head = self.stream.read_exact(FRAME_HEADER_LEN)
         var header = FrameHeader.parse(Span(head))
         if header.length > Int(self.our_settings.max_frame_size):
-            raise Error("h2: peer frame exceeds our max frame size")
+            self._conn_error(
+                ERR_FRAME_SIZE_ERROR, String("frame exceeds max frame size")
+            )
         var payload = List[Byte]()
         if header.length > 0:
             payload = self.stream.read_exact(header.length)
@@ -545,15 +574,12 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     # --- receiving / dispatch ---
 
     def process_next_frame(mut self) raises:
-        """Reads one frame, validates it per RFC 9113, and updates state.
+        """Reads and processes the next complete protocol action.
 
-        The single dispatch point every receive path goes through. Blocks
-        until a frame arrives. Effects by type: SETTINGS is applied and
-        ACKed; PING is answered; WINDOW_UPDATE grants send credit; DATA
-        and HEADERS (with any inline CONTINUATION frames) update the
-        stream's `StreamState`; RST_STREAM and GOAWAY record termination;
-        unknown frame types are ignored
-        ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113) §4.1).
+        This blocking compatibility adapter reads one frame and delegates to
+        `process_frame`. If that frame opens a fragmented header block, it
+        continues reading through END_HEADERS, preserving the method's
+        historical behavior for callers waiting on complete headers.
 
         Protocol violations follow §5.4: stream errors send RST_STREAM and
         return normally; connection errors send GOAWAY with the proper
@@ -565,15 +591,54 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             (after GOAWAY has been sent). The connection is unusable
             afterwards.
         """
-        var head = self.stream.read_exact(FRAME_HEADER_LEN)
-        var h = FrameHeader.parse(Span(head))
+        var frame = self._read_frame()
+        self.process_frame(frame^)
+        while self._pending_header_stream != 0:
+            frame = self._read_frame()
+            self.process_frame(frame^)
+
+    def process_frame(mut self, var frame: Frame) raises:
+        """Validates and dispatches one already-decoded HTTP/2 frame.
+
+        This method performs no reads from the underlying stream. It lets a
+        caller feed frames from an incremental decoder while retaining the
+        same connection state machine used by `process_next_frame`. Automatic
+        protocol responses still use the stream's blocking write path.
+
+        While a fragmented HEADERS block is open, only CONTINUATION on the
+        same stream is legal. Each call processes exactly one frame; header
+        fields become visible only after END_HEADERS arrives.
+
+        Args:
+            frame: A complete frame whose payload length matches its header.
+
+        Raises:
+            On a malformed frame or connection-level protocol error, after
+            sending GOAWAY when possible.
+        """
+        var h = frame.header
+        var payload_len = len(frame.payload)
+        var frame_payload = frame.payload^
+        frame.payload = List[Byte]()
+        if h.length != payload_len:
+            self._conn_error(
+                ERR_FRAME_SIZE_ERROR, String("frame payload length mismatch")
+            )
         if h.length > Int(self.our_settings.max_frame_size):
             self._conn_error(
                 ERR_FRAME_SIZE_ERROR, String("frame exceeds max frame size")
             )
-        var frame_payload = List[Byte]()
-        if h.length > 0:
-            frame_payload = self.stream.read_exact(h.length)
+
+        if self._pending_header_stream != 0:
+            if (
+                h.frame_type != FRAME_CONTINUATION
+                or h.stream_id != self._pending_header_stream
+            ):
+                self._conn_error(
+                    ERR_PROTOCOL_ERROR, String("expected CONTINUATION")
+                )
+            self._on_continuation(h, frame_payload^)
+            return
 
         if h.frame_type == FRAME_DATA or h.frame_type == FRAME_HEADERS:
             self.control_frames = 0
@@ -644,8 +709,6 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 ERR_PROTOCOL_ERROR, String("unexpected PUSH_PROMISE")
             )
         elif h.frame_type == FRAME_CONTINUATION:
-            # CONTINUATION is only legal directly after HEADERS (handled
-            # inside _on_headers).
             self._conn_error(ERR_PROTOCOL_ERROR, String("stray CONTINUATION"))
         else:
             # Unknown frame types must be ignored (§4.1).
@@ -806,8 +869,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     def _on_headers(
         mut self, h: FrameHeader, var frame_payload: List[Byte]
     ) raises:
-        """Handle HEADERS: state checks, inline CONTINUATION, HPACK decode,
-        MAX_CONCURRENT_STREAMS enforcement, and request validation."""
+        """Starts a HEADERS block and finishes it when END_HEADERS is set."""
         if h.stream_id == 0:
             self._conn_error(ERR_PROTOCOL_ERROR, String("HEADERS on stream 0"))
         var peer_initiated = (h.stream_id % 2 == 1) != self.is_client
@@ -849,19 +911,83 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 self_dep = True
             payload = payload[5 : len(payload)]
         var block = List[Byte](payload)
-        # Accumulate CONTINUATION frames until END_HEADERS.
-        var end_headers = h.has_flag(FLAG_END_HEADERS)
-        while not end_headers:
-            var cont = self._read_frame()
-            if (
-                cont.header.frame_type != FRAME_CONTINUATION
-                or cont.header.stream_id != h.stream_id
-            ):
-                self._conn_error(
-                    ERR_PROTOCOL_ERROR, String("expected CONTINUATION")
-                )
-            block.extend(Span(cont.payload))
-            end_headers = cont.header.has_flag(FLAG_END_HEADERS)
+        if len(block) > self.max_header_block_size:
+            self._conn_error(
+                ERR_ENHANCE_YOUR_CALM,
+                String("compressed header block too large"),
+            )
+        if not h.has_flag(FLAG_END_HEADERS):
+            self._pending_header_stream = h.stream_id
+            self._pending_header_flags = h.flags
+            self._pending_header_block = block^
+            self._pending_header_is_new = is_new
+            self._pending_header_peer_initiated = peer_initiated
+            self._pending_header_self_dependency = self_dep
+            self._pending_header_continuations = 0
+            return
+
+        self._finish_headers(
+            h.stream_id,
+            h.flags,
+            block^,
+            is_new,
+            peer_initiated,
+            self_dep,
+        )
+
+    def _on_continuation(
+        mut self, h: FrameHeader, var frame_payload: List[Byte]
+    ) raises:
+        """Appends one CONTINUATION fragment to the pending header block."""
+        self._pending_header_continuations += 1
+        if self._pending_header_continuations > self.max_header_continuations:
+            self._conn_error(
+                ERR_ENHANCE_YOUR_CALM,
+                String("too many CONTINUATION frames"),
+            )
+        if self.max_header_block_size < len(self._pending_header_block) or len(
+            frame_payload
+        ) > self.max_header_block_size - len(self._pending_header_block):
+            self._conn_error(
+                ERR_ENHANCE_YOUR_CALM,
+                String("compressed header block too large"),
+            )
+        self._pending_header_block.extend(Span(frame_payload))
+        if not h.has_flag(FLAG_END_HEADERS):
+            return
+
+        var stream_id = self._pending_header_stream
+        var flags = self._pending_header_flags
+        var is_new = self._pending_header_is_new
+        var peer_initiated = self._pending_header_peer_initiated
+        var self_dependency = self._pending_header_self_dependency
+        var block = self._pending_header_block^
+        self._pending_header_stream = 0
+        self._pending_header_flags = 0
+        self._pending_header_block = List[Byte]()
+        self._pending_header_is_new = False
+        self._pending_header_peer_initiated = False
+        self._pending_header_self_dependency = False
+        self._pending_header_continuations = 0
+        self._finish_headers(
+            stream_id,
+            flags,
+            block^,
+            is_new,
+            peer_initiated,
+            self_dependency,
+        )
+
+    def _finish_headers(
+        mut self,
+        stream_id: UInt32,
+        flags: UInt8,
+        var block: List[Byte],
+        is_new: Bool,
+        peer_initiated: Bool,
+        self_dependency: Bool,
+    ) raises:
+        """Decodes and applies a complete HEADERS plus CONTINUATION block."""
 
         var fields: List[HeaderField]
         try:
@@ -890,47 +1016,47 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 ):
                     active += 1
             if active >= self.max_concurrent_streams:
-                self._ensure_stream(h.stream_id)
-                self._stream_error(h.stream_id, ERR_REFUSED_STREAM)
+                self._ensure_stream(stream_id)
+                self._stream_error(stream_id, ERR_REFUSED_STREAM)
                 return
         # HEADERS opens/continues the stream even when we then reset it.
-        self._ensure_stream(h.stream_id)
-        if self_dep:
-            self._stream_error(h.stream_id, ERR_PROTOCOL_ERROR)
+        self._ensure_stream(stream_id)
+        if self_dependency:
+            self._stream_error(stream_id, ERR_PROTOCOL_ERROR)
             return
-        if self.streams[h.stream_id].reset_code:
-            if self.streams[h.stream_id].local_reset:
+        if self.streams[stream_id].reset_code:
+            if self.streams[stream_id].local_reset:
                 return
             self._conn_error(
                 ERR_STREAM_CLOSED, String("HEADERS on closed stream")
             )
-        var is_trailers = self.streams[h.stream_id].headers_done
-        if self.streams[h.stream_id].end_stream:
-            if self.streams[h.stream_id].local_end:
+        var is_trailers = self.streams[stream_id].headers_done
+        if self.streams[stream_id].end_stream:
+            if self.streams[stream_id].local_end:
                 # Fully closed stream (§5.1 "closed"): connection error.
                 self._conn_error(
                     ERR_STREAM_CLOSED, String("HEADERS on closed stream")
                 )
-            self._stream_error(h.stream_id, ERR_STREAM_CLOSED)
+            self._stream_error(stream_id, ERR_STREAM_CLOSED)
             return
-        if is_trailers and not h.has_flag(FLAG_END_STREAM):
+        if is_trailers and (flags & FLAG_END_STREAM) == 0:
             # Trailers must end the stream (§8.1).
-            self._stream_error(h.stream_id, ERR_PROTOCOL_ERROR)
+            self._stream_error(stream_id, ERR_PROTOCOL_ERROR)
             return
         if self.validate_requests and not self._validate_header_block(
-            h.stream_id, Span(fields), is_trailers
+            stream_id, Span(fields), is_trailers
         ):
-            self._stream_error(h.stream_id, ERR_PROTOCOL_ERROR)
+            self._stream_error(stream_id, ERR_PROTOCOL_ERROR)
             return
         if not is_trailers:
-            self.streams[h.stream_id].headers = fields^
-            self.streams[h.stream_id].headers_done = True
+            self.streams[stream_id].headers = fields^
+            self.streams[stream_id].headers_done = True
         else:
-            self.streams[h.stream_id].trailers = fields^
-            self.streams[h.stream_id].trailers_done = True
-        if h.has_flag(FLAG_END_STREAM):
-            self.streams[h.stream_id].end_stream = True
-            self._check_content_length(h.stream_id)
+            self.streams[stream_id].trailers = fields^
+            self.streams[stream_id].trailers_done = True
+        if (flags & FLAG_END_STREAM) != 0:
+            self.streams[stream_id].end_stream = True
+            self._check_content_length(stream_id)
 
     def _validate_header_block(
         mut self,

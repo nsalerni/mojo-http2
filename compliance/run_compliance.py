@@ -427,6 +427,233 @@ def section_h2_incremental(tmp: Path):
     )
 
 
+def section_h2_dispatch(tmp: Path):
+    print("== stateful h2 frame dispatch vs hyper-h2 ==")
+    import h2.config
+    import h2.connection
+    import h2.events
+    import h2.exceptions
+    import hpack
+    import hyperframe.frame as hf
+
+    def split_headers(stream_id, block, cuts, *, end_stream=True):
+        parts = []
+        start = 0
+        for cut in cuts:
+            parts.append(block[start:cut])
+            start = cut
+        parts.append(block[start:])
+        first = hf.HeadersFrame(stream_id, data=parts[0])
+        if end_stream:
+            first.flags.add("END_STREAM")
+        if len(parts) == 1:
+            first.flags.add("END_HEADERS")
+            return [first]
+        frames = [first]
+        for index, part in enumerate(parts[1:]):
+            continuation = hf.ContinuationFrame(stream_id, data=part)
+            if index == len(parts) - 2:
+                continuation.flags.add("END_HEADERS")
+            frames.append(continuation)
+        return frames
+
+    def response_block(encoder, sequence):
+        return encoder.encode([
+            (b":status", b"200"),
+            (b"content-type", b"application/grpc"),
+            (b"x-sequence", sequence.encode()),
+        ])
+
+    cases = []
+    encoder = hpack.Encoder()
+    block = response_block(encoder, "one")
+    cases.append(("split-two", 1, split_headers(1, block, [7])))
+
+    encoder = hpack.Encoder()
+    block = response_block(encoder, "one")
+    cases.append(("split-three", 1, split_headers(1, block, [3, 11])))
+
+    encoder = hpack.Encoder()
+    block = response_block(encoder, "one")
+    cases.append(("complete", 1, split_headers(1, block, [])))
+
+    encoder = hpack.Encoder()
+    first = response_block(encoder, "one")
+    second = response_block(encoder, "two")
+    dynamic_frames = split_headers(1, first, [5])
+    dynamic_frames += split_headers(3, second, [2])
+    cases.append(("dynamic-two-streams", 2, dynamic_frames))
+
+    encoder = hpack.Encoder()
+    block = response_block(encoder, "one")
+    incomplete = split_headers(1, block, [5])[0]
+    cases.append((
+        "interleaved-ping",
+        1,
+        [incomplete, hf.PingFrame(0, opaque_data=b"12345678")],
+    ))
+
+    encoder = hpack.Encoder()
+    block = response_block(encoder, "one")
+    incomplete = split_headers(1, block, [5])[0]
+    wrong = hf.ContinuationFrame(3, data=block[5:], flags=["END_HEADERS"])
+    cases.append(("wrong-continuation-stream", 1, [incomplete, wrong]))
+
+    stray = hf.ContinuationFrame(1, data=b"", flags=["END_HEADERS"])
+    cases.append(("stray-continuation", 1, [stray]))
+
+    settings = hf.SettingsFrame(0).serialize()
+
+    def reference_result(open_count, frames):
+        config = h2.config.H2Configuration(
+            client_side=True, header_encoding="utf-8"
+        )
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        stream_ids = []
+        for _ in range(open_count):
+            stream_id = conn.get_next_available_stream_id()
+            stream_ids.append(stream_id)
+            conn.send_headers(
+                stream_id,
+                [
+                    (":method", "POST"),
+                    (":scheme", "https"),
+                    (":path", "/dispatch"),
+                    (":authority", "localhost"),
+                ],
+                end_stream=True,
+            )
+        conn.data_to_send()
+        state = {
+            stream_id: {"headers": [], "headers_done": False, "end": False}
+            for stream_id in stream_ids
+        }
+        try:
+            conn.receive_data(settings)
+            conn.data_to_send()
+            for frame in frames:
+                for event in conn.receive_data(frame.serialize()):
+                    if isinstance(event, h2.events.ResponseReceived):
+                        state[event.stream_id]["headers"] = [
+                            tuple(field) for field in event.headers
+                        ]
+                        state[event.stream_id]["headers_done"] = True
+                    elif isinstance(event, h2.events.StreamEnded):
+                        state[event.stream_id]["end"] = True
+            return "OK", state
+        except h2.exceptions.ProtocolError:
+            return "ERROR", state
+
+    infile = tmp / "h2d_in.txt"
+    outfile = tmp / "h2d_out.txt"
+    lines = []
+    expected = {}
+    for name, open_count, frames in cases:
+        lines.append(f"CASE {name}")
+        lines.extend("OPEN" for _ in range(open_count))
+        lines.append(f"FRAME {settings.hex()}")
+        lines.extend(f"FRAME {frame.serialize().hex()}" for frame in frames)
+        lines.append("END")
+        expected[name] = reference_result(open_count, frames)
+    infile.write_text("\n".join(lines) + "\n")
+
+    result = run_tool("h2_dispatch_tool", infile, outfile, timeout=120)
+    tool_ok = result.returncode == 0
+    detail = result.stderr[:300]
+    parsed = {}
+    current = None
+    parse_ok = tool_ok
+    if tool_ok:
+        for line in outfile.read_text().splitlines():
+            if line.startswith("CASE "):
+                name = line[5:]
+                if current is not None or name in parsed:
+                    parse_ok = False
+                    break
+                current = {
+                    "name": name,
+                    "streams": {},
+                    "error": "",
+                    "result": "",
+                    "goaway": False,
+                }
+            elif line.startswith("S ") and current is not None:
+                _, sid, headers_done, ended = line.split()
+                current["streams"][int(sid)] = {
+                    "headers": [],
+                    "headers_done": headers_done == "True",
+                    "end": ended == "True",
+                }
+            elif line.startswith("H ") and current is not None:
+                _, sid, name_hex, value_hex = line.split()
+                stream = current["streams"].get(int(sid))
+                if stream is None:
+                    parse_ok = False
+                    break
+                stream["headers"].append(
+                    (bytes.fromhex(name_hex).decode(), bytes.fromhex(value_hex).decode())
+                )
+            elif line.startswith("ERROR ") and current is not None:
+                current["error"] = line[6:]
+            elif line.startswith("END ") and current is not None:
+                _, status, goaway = line.split()
+                current["result"] = status
+                current["goaway"] = goaway == "True"
+                parsed[current["name"]] = current
+                current = None
+            else:
+                parse_ok = False
+                break
+        if current is not None or sorted(parsed) != sorted(expected):
+            parse_ok = False
+    if not parse_ok:
+        tool_ok = False
+        detail = detail or "dispatch probe emitted malformed case output"
+
+    def record_cases(label, names):
+        if not names:
+            record("h2", label, False, "compliance case selection was empty")
+            return
+        ok = tool_ok
+        why = detail
+        for name in names:
+            expected_result, expected_streams = expected[name]
+            actual = parsed.get(name, {})
+            if actual.get("result") != expected_result:
+                ok = False
+                why = (
+                    f"{name}: hyper-h2={expected_result} "
+                    f"mojo={actual.get('result')} error={actual.get('error')}"
+                )
+                break
+            if expected_result == "OK" and actual.get("streams") != expected_streams:
+                ok = False
+                why = (
+                    f"{name}: state mismatch: want {expected_streams} "
+                    f"got {actual.get('streams')}"
+                )
+                break
+            if expected_result == "ERROR" and not actual.get("goaway"):
+                ok = False
+                why = f"{name}: protocol error did not send GOAWAY"
+                break
+        record("h2", label, ok, why)
+
+    record_cases(
+        "process_frame reassembles hyper-h2 header blocks across one or more CONTINUATION frames",
+        ["split-two", "split-three", "complete"],
+    )
+    record_cases(
+        "process_frame preserves HPACK dynamic state across streams",
+        ["dynamic-two-streams"],
+    )
+    record_cases(
+        "process_frame matches hyper-h2 rejection of illegal CONTINUATION sequences",
+        ["interleaved-ping", "wrong-continuation-stream", "stray-continuation"],
+    )
+
+
 def h2_reference_echo_server(
     sock: socket.socket, result: dict, tls_context: ssl.SSLContext | None = None
 ):
@@ -1058,6 +1285,7 @@ def main() -> int:
         section_hpack(tmp)
         section_h2_frames(tmp)
         section_h2_incremental(tmp)
+        section_h2_dispatch(tmp)
         section_h2_live(tmp)
         section_h2_tls(tmp)
         section_h2spec(tmp)

@@ -19,7 +19,32 @@ from std.sys import argv
 
 from hpack import Decoder, Encoder, HeaderField
 from hpack.huffman import HuffmanTree, huffman_encode
+from h2 import Frame, Http2Connection
 from h2.frame import FrameHeader, IncrementalFrameDecoder
+from net import IOStream
+
+
+struct SinkStream(IOStream):
+    """An in-memory benchmark transport that discards protocol output."""
+
+    def __init__(out self):
+        pass
+
+    def read_exact(self, n: Int) raises -> List[Byte]:
+        _ = n
+        raise Error("benchmark SinkStream cannot read")
+
+    def write_all(self, data: Span[Byte, _]) raises:
+        _ = data
+
+    def set_read_timeout(self, nanos: Int64) raises:
+        _ = nanos
+
+    def set_nodelay(self, enabled: Bool) raises:
+        _ = enabled
+
+    def close(mut self):
+        pass
 
 
 def is_smoke() -> Bool:
@@ -177,6 +202,33 @@ def main() raises:
 
     r = run_capped(frame_roundtrip, secs)
     report_line("frame header serialize+parse", r, 9)
+
+    # --- connection dispatch without transport reads ---
+    # Unknown types are the smallest valid no-op in RFC 9113. This isolates
+    # public process_frame routing and validation from socket and HPACK work.
+    var dispatch_conn = Http2Connection(SinkStream(), is_client=True)
+    var dispatch_count = 0
+
+    def dispatch_unknown() raises {mut dispatch_conn, mut dispatch_count}:
+        dispatch_conn.process_frame(
+            Frame(
+                header=FrameHeader(
+                    length=0, frame_type=0xFE, flags=0, stream_id=0
+                ),
+                payload=List[Byte](),
+            )
+        )
+        dispatch_count += 1
+
+    r = run_capped(dispatch_unknown, secs)
+    if dispatch_count == 0:
+        raise Error("frame dispatch benchmark did not run")
+    print(
+        "connection frame dispatch (unknown no-op): ",
+        Int(r),
+        " ns/op",
+        sep="",
+    )
 
     # Incremental decoder over 1 MiB of prebuilt DATA frames. Both paths
     # decode identical bytes; the chunked case models readiness-driven reads.

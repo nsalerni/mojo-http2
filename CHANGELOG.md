@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added stateful `process_frame` dispatch for readiness-driven callers while
+  preserving the blocking `process_next_frame` API.
+- Bounded compressed HEADERS plus CONTINUATION storage and fragment count, and
+  verified legal and illegal sequences against hyper-h2.
+
 ## 0.2.1 - 2026-08-20
 
 - Added bounded incremental HTTP/2 frame decoding for split and coalesced
