@@ -230,6 +230,20 @@ def main() raises:
         sep="",
     )
 
+    # --- outbound frame queue ---
+    var queue_conn = Http2Connection(SinkStream(), is_client=True)
+    var queued_bytes = 0
+
+    def queue_ping() raises {mut queue_conn, mut queued_bytes}:
+        queue_conn.queue_ping(0x3132333435363738)
+        var output = queue_conn.take_pending_output()
+        queued_bytes += len(output)
+
+    r = run_capped(queue_ping, secs)
+    if queued_bytes == 0 or queued_bytes % 17 != 0:
+        raise Error("outbound queue benchmark produced invalid output")
+    report_line("queue and take PING frame", r, 17)
+
     # Incremental decoder over 1 MiB of prebuilt DATA frames. Both paths
     # decode identical bytes; the chunked case models readiness-driven reads.
     var frame_count = 64

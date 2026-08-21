@@ -6,6 +6,9 @@
   preserving the blocking `process_next_frame` API.
 - Bounded compressed HEADERS plus CONTINUATION storage and fragment count, and
   verified legal and illegal sequences against hyper-h2.
+- Added a bounded outbound frame queue and non-writing `queue_*` APIs, with
+  automatic protocol responses and flow-control progress verified against
+  hyper-h2.
 
 ## 0.2.1 - 2026-08-20
 

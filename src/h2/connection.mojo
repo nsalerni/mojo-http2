@@ -8,13 +8,13 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 # ===----------------------------------------------------------------------=== #
 
-"""HTTP/2 connection state machine ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)) over a blocking TCP stream.
+"""HTTP/2 connection state machine ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)) over an IOStream.
 
-Single-threaded design: callers drive the connection by calling
-`Http2Connection.process_next_frame` until the state they are waiting for
-appears; the `wait_headers`/`wait_data`/`wait_stream_end`/`take_data`
-helpers wrap that loop for common cases. This matches the blocking-I/O v0
-transport (docs/ARCHITECTURE.md).
+Single-threaded design: readiness-driven callers feed decoded frames through
+`Http2Connection.process_frame` and take serialized responses from its bounded
+outbound queue. Blocking callers use `process_next_frame`, the `send_*`
+methods, and the `wait_headers`/`wait_data`/`wait_stream_end`/`take_data`
+helpers.
 
 Error handling follows RFC 9113 §5.4: connection errors send GOAWAY with
 the appropriate error code and then raise, ending the connection; stream
@@ -147,17 +147,16 @@ struct StreamState(Movable):
 
 
 struct Http2Connection[S: IOStream = TCPStream](Movable):
-    """HTTP/2 connection state machine over a blocking byte stream.
+    """HTTP/2 connection state machine over a reliable byte stream.
 
     Usable as either endpoint: construct with `is_client=True` to send the
     connection preface, or `is_client=False` to expect it. Construction
     also sends the initial SETTINGS frame; the peer's SETTINGS is handled
     by the normal frame loop.
 
-    There is no background thread or event loop. Callers pump the
-    connection by calling `process_next_frame` — directly, or via the
-    blocking helpers (`wait_headers`, `wait_data`, `wait_stream_end`,
-    `take_data`) — and read the per-stream results from `streams`.
+    There is no background thread or event loop. Callers either feed complete
+    frames with `process_frame` and take the resulting queued output, or pump
+    a blocking stream with `process_next_frame` and the `wait_*` helpers.
 
     Per [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113) §5.4, protocol
     violations that are connection errors send GOAWAY and then raise;
@@ -216,6 +215,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     """Our limit on compressed bytes retained across a header block."""
     var max_header_continuations: Int
     """Our limit on CONTINUATION frames in one header block."""
+    var max_pending_output_size: Int
+    """Maximum outbound bytes retained; at least 26 for frame dispatch."""
+    var _pending_output: List[Byte]
+    """Serialized frames waiting to be taken or flushed in FIFO order."""
     var _pending_header_stream: UInt32
     """Stream whose fragmented header block is awaiting CONTINUATION."""
     var _pending_header_flags: UInt8
@@ -273,6 +276,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.max_header_list_size = 16384
         self.max_header_block_size = 65536
         self.max_header_continuations = 1024
+        self.max_pending_output_size = 1048576
+        self._pending_output = List[Byte]()
         self._pending_header_stream = 0
         self._pending_header_flags = 0
         self._pending_header_block = List[Byte]()
@@ -309,6 +314,44 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
     # --- low-level frame I/O ---
 
+    def _ensure_output_capacity(self, additional: Int) raises:
+        """Rejects output that would exceed the configured queue bound."""
+        if (
+            additional < 0
+            or self.max_pending_output_size < len(self._pending_output)
+            or additional
+            > self.max_pending_output_size - len(self._pending_output)
+        ):
+            raise Error("h2: outbound frame queue limit exceeded")
+
+    def _queue_frame_unchecked(
+        mut self,
+        frame_type: UInt8,
+        flags: UInt8,
+        stream_id: UInt32,
+        payload: List[Byte],
+    ):
+        """Serializes one frame after its queue capacity was reserved."""
+        var header = FrameHeader(
+            length=len(payload),
+            frame_type=frame_type,
+            flags=flags,
+            stream_id=stream_id,
+        )
+        header.serialize(self._pending_output)
+        self._pending_output.extend(Span(payload))
+
+    def _queue_frame(
+        mut self,
+        frame_type: UInt8,
+        flags: UInt8,
+        stream_id: UInt32,
+        payload: List[Byte],
+    ) raises:
+        """Serializes and appends one bounded frame to the output queue."""
+        self._ensure_output_capacity(FRAME_HEADER_LEN + len(payload))
+        self._queue_frame_unchecked(frame_type, flags, stream_id, payload)
+
     def _write_frame(
         mut self,
         frame_type: UInt8,
@@ -316,17 +359,43 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         stream_id: UInt32,
         payload: List[Byte],
     ) raises:
-        """Serialize and send one frame."""
-        var buf = List[Byte](capacity=FRAME_HEADER_LEN + len(payload))
-        var header = FrameHeader(
-            length=len(payload),
-            frame_type=frame_type,
-            flags=flags,
-            stream_id=stream_id,
-        )
-        header.serialize(buf)
-        buf.extend(Span(payload))
-        self.stream.write_all(Span(buf))
+        """Queues and synchronously flushes one frame."""
+        self._queue_frame(frame_type, flags, stream_id, payload)
+        self.flush_output()
+
+    def pending_output_len(self) -> Int:
+        """Reports how much serialized output is waiting.
+
+        Returns:
+            The number of bytes currently held in the outbound queue.
+        """
+        return len(self._pending_output)
+
+    def take_pending_output(mut self) -> List[Byte]:
+        """Takes every queued byte in FIFO order without transport I/O.
+
+        Returns:
+            The serialized frames currently ready to write. The connection's
+            queue is empty after this call.
+        """
+        var output = self._pending_output^
+        self._pending_output = List[Byte]()
+        return output^
+
+    def flush_output(mut self) raises:
+        """Writes every queued byte through the blocking stream.
+
+        The queue is cleared only after `write_all` succeeds. A transport
+        error makes the connection unusable because a partial write cannot
+        be resumed through the blocking `IOStream` contract.
+
+        Raises:
+            On transport write errors.
+        """
+        if len(self._pending_output) == 0:
+            return
+        self.stream.write_all(Span(self._pending_output))
+        self._pending_output = List[Byte]()
 
     def _read_frame(mut self) raises -> Frame:
         """Read one frame, enforcing our max frame size."""
@@ -371,18 +440,17 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
     # --- sending ---
 
-    def send_headers(
+    def queue_headers(
         mut self,
         stream_id: UInt32,
         fields: Span[HeaderField, _],
         *,
         end_stream: Bool,
     ) raises:
-        """Sends a header block as HEADERS plus CONTINUATION as needed.
+        """Queues a header block as HEADERS plus CONTINUATION as needed.
 
         The block is HPACK-encoded and split into chunks no larger than the
-        peer's SETTINGS_MAX_FRAME_SIZE; END_HEADERS is set on the final
-        frame.
+        peer's SETTINGS_MAX_FRAME_SIZE. No transport I/O is performed.
 
         Args:
             stream_id: The stream to send on.
@@ -391,25 +459,40 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 the stream (as in a bodiless request, or gRPC trailers).
 
         Raises:
-            On transport errors.
+            If the bounded queue cannot safely admit the whole header block.
         """
+        # Preflight a conservative literal representation before mutating the
+        # stateful HPACK encoder. Huffman output is never longer than raw input
+        # in this encoder; the per-field allowance covers integer prefixes.
+        var upper_bound = 0
+        for f in fields:
+            upper_bound += f.name.byte_length() + f.value.byte_length() + 32
+        var max_len = Int(self.peer_settings.max_frame_size)
+        var upper_frames = max(1, (upper_bound + max_len - 1) // max_len)
+        self._ensure_output_capacity(
+            upper_bound + upper_frames * FRAME_HEADER_LEN
+        )
+
         var block = List[Byte]()
         for f in fields:
             self.hpack_enc.encode_field(f, block)
-        var max_len = Int(self.peer_settings.max_frame_size)
+        var frame_count = max(1, (len(block) + max_len - 1) // max_len)
+        self._ensure_output_capacity(
+            len(block) + frame_count * FRAME_HEADER_LEN
+        )
         var flags: UInt8 = 0
         if end_stream:
             flags |= FLAG_END_STREAM
             self._ensure_stream(stream_id)
             self.streams[stream_id].local_end = True
         if len(block) <= max_len:
-            self._write_frame(
+            self._queue_frame_unchecked(
                 FRAME_HEADERS, flags | FLAG_END_HEADERS, stream_id, block
             )
             return
         # Split into HEADERS + CONTINUATION frames.
         var first = List[Byte](Span(block)[0:max_len])
-        self._write_frame(FRAME_HEADERS, flags, stream_id, first)
+        self._queue_frame_unchecked(FRAME_HEADERS, flags, stream_id, first)
         var off = max_len
         while off < len(block):
             var end = min(off + max_len, len(block))
@@ -417,69 +500,146 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             var cflags: UInt8 = 0
             if end == len(block):
                 cflags = FLAG_END_HEADERS
-            self._write_frame(FRAME_CONTINUATION, cflags, stream_id, chunk)
+            self._queue_frame_unchecked(
+                FRAME_CONTINUATION, cflags, stream_id, chunk
+            )
             off = end
 
-    def send_data(
-        mut self, stream_id: UInt32, data: Span[Byte, _], *, end_stream: Bool
+    def send_headers(
+        mut self,
+        stream_id: UInt32,
+        fields: Span[HeaderField, _],
+        *,
+        end_stream: Bool,
     ) raises:
-        """Sends DATA frames, respecting flow control.
+        """Queues and synchronously flushes a complete header block.
 
-        Chunks the payload to the peer's max frame size and to the
-        connection and stream send windows. When both windows are
-        exhausted, blocks in `process_next_frame` until the peer grants
-        credit via WINDOW_UPDATE (incoming frames are processed normally
-        while waiting). An empty payload with `end_stream=True` sends an
-        empty END_STREAM DATA frame.
+        Args:
+            stream_id: The stream to send on.
+            fields: The header fields, in wire order.
+            end_stream: True to finish the local side of the stream.
+
+        Raises:
+            On queue capacity or transport write errors.
+        """
+        self.flush_output()
+        self.queue_headers(stream_id, fields, end_stream=end_stream)
+        self.flush_output()
+
+    def queue_data(
+        mut self, stream_id: UInt32, data: Span[Byte, _], *, end_stream: Bool
+    ) raises -> Int:
+        """Queues DATA up to the currently available flow-control credit.
+
+        No transport I/O or incoming frame processing is performed. The
+        caller can retry the unconsumed suffix after WINDOW_UPDATE arrives.
+        END_STREAM is queued only when the entire supplied payload fits. An
+        empty payload with `end_stream=True` queues an empty DATA frame.
 
         Args:
             stream_id: The stream to send on; must already exist.
             data: The payload bytes.
-            end_stream: True to set END_STREAM on the final frame,
-                finishing our side of the stream.
+            end_stream: True to finish our side if all supplied bytes fit.
+
+        Returns:
+            The number of payload bytes consumed into the queue. Zero means
+            flow-control credit or queue capacity must become available.
 
         Raises:
-            On transport errors, if the stream is unknown, or if a
-            connection error occurs while waiting for window credit.
+            If the stream is unknown, or an empty END_STREAM frame would
+            exceed the outbound queue bound.
         """
+        if stream_id not in self.streams:
+            raise Error("h2: queue_data on unknown stream")
+        if len(data) == 0:
+            if end_stream:
+                self._queue_frame(
+                    FRAME_DATA, FLAG_END_STREAM, stream_id, List[Byte]()
+                )
+                self.streams[stream_id].local_end = True
+            return 0
+
+        var flow_allowed = min(
+            len(data),
+            self.send_window,
+            self.streams[stream_id].send_window,
+        )
+        if flow_allowed <= 0:
+            return 0
+        var max_len = Int(self.peer_settings.max_frame_size)
+        var queue_budget = self.max_pending_output_size - len(
+            self._pending_output
+        )
+        var allowed = 0
+        while allowed < flow_allowed and queue_budget > FRAME_HEADER_LEN:
+            var chunk = min(
+                max_len,
+                flow_allowed - allowed,
+                queue_budget - FRAME_HEADER_LEN,
+            )
+            if chunk <= 0:
+                break
+            allowed += chunk
+            queue_budget -= FRAME_HEADER_LEN + chunk
+        if allowed == 0:
+            return 0
+        var frame_count = (allowed + max_len - 1) // max_len
+        self._ensure_output_capacity(allowed + frame_count * FRAME_HEADER_LEN)
+
+        var off = 0
+        while off < allowed:
+            var end = min(off + max_len, allowed)
+            var chunk = List[Byte](Span(data)[off:end])
+            var flags: UInt8 = 0
+            if end_stream and end == len(data):
+                flags = FLAG_END_STREAM
+            self._queue_frame_unchecked(FRAME_DATA, flags, stream_id, chunk)
+            off = end
+        self.send_window -= allowed
+        self.streams[stream_id].send_window -= allowed
+        if end_stream and allowed == len(data):
+            self.streams[stream_id].local_end = True
+        return allowed
+
+    def send_data(
+        mut self, stream_id: UInt32, data: Span[Byte, _], *, end_stream: Bool
+    ) raises:
+        """Synchronously sends DATA, waiting for flow-control credit.
+
+        Args:
+            stream_id: The stream to send on; must already exist.
+            data: The payload bytes.
+            end_stream: True to finish the local side after the payload.
+
+        Raises:
+            On queue capacity or transport errors, if the stream is unknown,
+            or on protocol errors while waiting for WINDOW_UPDATE.
+        """
+        self.flush_output()
+        if len(data) == 0:
+            _ = self.queue_data(stream_id, data, end_stream=end_stream)
+            self.flush_output()
+            return
         var off = 0
         while off < len(data):
-            if stream_id not in self.streams:
-                raise Error("h2: send_data on unknown stream")
-            var stream_window = self.streams[stream_id].send_window
-            var allowed = min(
-                len(data) - off,
-                Int(self.peer_settings.max_frame_size),
-                self.send_window,
-                stream_window,
+            var consumed = self.queue_data(
+                stream_id, data[off : len(data)], end_stream=end_stream
             )
-            if allowed <= 0:
-                # Wait for WINDOW_UPDATE (or an error) from the peer.
+            if consumed == 0:
+                if (
+                    self.send_window > 0
+                    and self.streams[stream_id].send_window > 0
+                ):
+                    raise Error("h2: outbound queue too small for DATA frame")
                 self.process_next_frame()
                 continue
-            var chunk = List[Byte](Span(data)[off : off + allowed])
-            var last = off + allowed == len(data)
-            var flags: UInt8 = 0
-            if end_stream and last:
-                flags = FLAG_END_STREAM
-            self._write_frame(FRAME_DATA, flags, stream_id, chunk)
-            self.send_window -= allowed
-            try:
-                self.streams[stream_id].send_window -= allowed
-            except:
-                pass
-            off += allowed
-        if len(data) == 0 and end_stream:
-            self._write_frame(
-                FRAME_DATA, FLAG_END_STREAM, stream_id, List[Byte]()
-            )
-        if end_stream and stream_id in self.streams:
-            self.streams[stream_id].local_end = True
+            self.flush_output()
+            off += consumed
 
-    def send_rst_stream(mut self, stream_id: UInt32, code: UInt32) raises:
-        """Sends RST_STREAM, terminating one stream with an error code.
+    def queue_rst_stream(mut self, stream_id: UInt32, code: UInt32) raises:
+        """Queues RST_STREAM without performing transport I/O.
 
-        Only writes the frame; callers wanting local bookkeeping updated
+        Only queues the frame; callers wanting local bookkeeping updated
         should rely on the connection's own error paths, which mark the
         stream reset before sending.
 
@@ -488,14 +648,28 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             code: One of the ERR_* error codes.
 
         Raises:
-            On transport errors.
+            If the frame would exceed the outbound queue bound.
         """
         var payload = List[Byte](capacity=4)
         put_u32_be(payload, code)
-        self._write_frame(FRAME_RST_STREAM, 0, stream_id, payload)
+        self._queue_frame(FRAME_RST_STREAM, 0, stream_id, payload)
 
-    def send_goaway(mut self, code: UInt32) raises:
-        """Sends GOAWAY, beginning connection shutdown.
+    def send_rst_stream(mut self, stream_id: UInt32, code: UInt32) raises:
+        """Queues and synchronously flushes RST_STREAM.
+
+        Args:
+            stream_id: The stream to reset.
+            code: One of the ERR_* error codes.
+
+        Raises:
+            On queue capacity or transport write errors.
+        """
+        self.flush_output()
+        self.queue_rst_stream(stream_id, code)
+        self.flush_output()
+
+    def queue_goaway(mut self, code: UInt32) raises:
+        """Queues GOAWAY without performing transport I/O.
 
         The last-stream-id field is set to the highest peer-initiated
         stream we have processed, telling the peer which streams may have
@@ -507,13 +681,26 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 shutdown).
 
         Raises:
-            On transport errors.
+            If the frame would exceed the outbound queue bound.
         """
-        self.sent_goaway = True
         var payload = List[Byte](capacity=8)
         put_u32_be(payload, self.highest_remote_stream)
         put_u32_be(payload, code)
-        self._write_frame(FRAME_GOAWAY, 0, 0, payload)
+        self._queue_frame(FRAME_GOAWAY, 0, 0, payload)
+        self.sent_goaway = True
+
+    def send_goaway(mut self, code: UInt32) raises:
+        """Queues and synchronously flushes GOAWAY.
+
+        Args:
+            code: One of the ERR_* error codes.
+
+        Raises:
+            On queue capacity or transport write errors.
+        """
+        self.flush_output()
+        self.queue_goaway(code)
+        self.flush_output()
 
     # --- error signaling (RFC 9113 §5.4) ---
 
@@ -521,7 +708,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         """Connection error: GOAWAY with the code, then raise."""
         if not self.sent_goaway:
             try:
-                self.send_goaway(code)
+                self.queue_goaway(code)
             except:
                 pass
         raise Error("h2: connection error: " + msg)
@@ -531,10 +718,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self._ensure_stream(sid)
         self.streams[sid].local_reset = True
         self.streams[sid].reset_code = code
-        try:
-            self.send_rst_stream(sid, code)
-        except:
-            pass
+        self.queue_rst_stream(sid, code)
 
     def _bump_control(mut self) raises:
         """PING/SETTINGS flood guard: control frames with no useful frames
@@ -554,8 +738,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             return sid > self.highest_remote_stream
         return sid >= self.next_stream_id
 
-    def send_ping(mut self, data: UInt64) raises:
-        """Sends a PING frame with the given opaque payload.
+    def queue_ping(mut self, data: UInt64) raises:
+        """Queues a PING frame without performing transport I/O.
 
         The peer must answer with a PING ACK carrying the same 8 bytes;
         the ACK is consumed by `process_next_frame`.
@@ -564,12 +748,25 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             data: Opaque payload, sent big-endian.
 
         Raises:
-            On transport errors.
+            If the frame would exceed the outbound queue bound.
         """
         var payload = List[Byte](capacity=8)
         for i in range(8):
             payload.append(UInt8((data >> UInt64(56 - 8 * i)) & 0xFF))
-        self._write_frame(FRAME_PING, 0, 0, payload)
+        self._queue_frame(FRAME_PING, 0, 0, payload)
+
+    def send_ping(mut self, data: UInt64) raises:
+        """Queues and synchronously flushes a PING frame.
+
+        Args:
+            data: Opaque payload, sent big-endian.
+
+        Raises:
+            On queue capacity or transport write errors.
+        """
+        self.flush_output()
+        self.queue_ping(data)
+        self.flush_output()
 
     # --- receiving / dispatch ---
 
@@ -591,11 +788,21 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             (after GOAWAY has been sent). The connection is unusable
             afterwards.
         """
-        var frame = self._read_frame()
-        self.process_frame(frame^)
-        while self._pending_header_stream != 0:
-            frame = self._read_frame()
+        self.flush_output()
+        self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
+        try:
+            var frame = self._read_frame()
             self.process_frame(frame^)
+            while self._pending_header_stream != 0:
+                frame = self._read_frame()
+                self.process_frame(frame^)
+            self.flush_output()
+        except error:
+            try:
+                self.flush_output()
+            except:
+                pass
+            raise error
 
     def process_frame(mut self, var frame: Frame) raises:
         """Validates and dispatches one already-decoded HTTP/2 frame.
@@ -603,7 +810,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         This method performs no reads from the underlying stream. It lets a
         caller feed frames from an incremental decoder while retaining the
         same connection state machine used by `process_next_frame`. Automatic
-        protocol responses still use the stream's blocking write path.
+        protocol responses are appended to the outbound queue in wire order.
 
         While a fragmented HEADERS block is open, only CONTINUATION on the
         same stream is legal. Each call processes exactly one frame; header
@@ -614,8 +821,14 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
         Raises:
             On a malformed frame or connection-level protocol error, after
-            sending GOAWAY when possible.
+            queueing GOAWAY when possible. If fewer than 26 outbound bytes
+            are available, the frame is not processed and the caller can
+            drain the queue before retrying it.
         """
+        # One DATA frame can queue both RST_STREAM for a content-length
+        # mismatch and a connection WINDOW_UPDATE. Reserve that worst case
+        # before mutating receive state so queue backpressure is retryable.
+        self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
         var h = frame.header
         var payload_len = len(frame.payload)
         var frame_payload = frame.payload^
@@ -652,7 +865,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             if h.length != 8:
                 self._conn_error(ERR_FRAME_SIZE_ERROR, String("PING length"))
             if not h.has_flag(FLAG_ACK):
-                self._write_frame(FRAME_PING, FLAG_ACK, 0, frame_payload.copy())
+                self._queue_frame(FRAME_PING, FLAG_ACK, 0, frame_payload.copy())
         elif h.frame_type == FRAME_WINDOW_UPDATE:
             self._on_window_update(h, Span(frame_payload))
         elif h.frame_type == FRAME_DATA:
@@ -764,7 +977,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         if delta != 0:
             for id in self.stream_ids:
                 self.streams[id].send_window += delta
-        self._write_frame(FRAME_SETTINGS, FLAG_ACK, 0, List[Byte]())
+        self._queue_frame(FRAME_SETTINGS, FLAG_ACK, 0, List[Byte]())
 
     def _on_window_update(
         mut self, h: FrameHeader, payload: Span[Byte, _]
@@ -858,7 +1071,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         var inc = List[Byte](capacity=4)
         put_u32_be(inc, UInt32(h.length))
         self.recv_window += h.length
-        self._write_frame(FRAME_WINDOW_UPDATE, 0, 0, inc)
+        self._queue_frame(FRAME_WINDOW_UPDATE, 0, 0, inc)
 
     def _check_content_length(mut self, sid: UInt32) raises:
         """Reset the stream if actual DATA length contradicts content-length."""
@@ -1184,13 +1397,56 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 return False
             self.process_next_frame()
 
-    def take_data(mut self, stream_id: UInt32, n: Int) raises -> List[Byte]:
-        """Consumes exactly n buffered bytes, processing frames as needed.
+    def take_buffered_data(
+        mut self, stream_id: UInt32, n: Int
+    ) raises -> List[Byte]:
+        """Consumes already-buffered bytes and queues flow-control credit.
 
-        Consumption drives per-stream flow control: taking bytes sends the
-        peer a stream-level WINDOW_UPDATE for the amount consumed, so a
-        slow reader bounds the peer's sending (backpressure). The
-        connection-level window is replenished on receipt instead.
+        This method performs no transport I/O and never processes incoming
+        frames. Use `buffered_data_len` first in a readiness-driven loop.
+
+        Args:
+            stream_id: The stream to consume from.
+            n: Exact number of buffered bytes to consume.
+
+        Returns:
+            The first n buffered bytes, removed from the stream's buffer.
+
+        Raises:
+            If n is negative, the stream is unknown, too few bytes are
+            buffered, or the WINDOW_UPDATE would exceed the outbound queue
+            bound.
+        """
+        if n < 0:
+            raise Error("h2: negative data length")
+        if (
+            stream_id not in self.streams
+            or len(self.streams[stream_id].data) < n
+        ):
+            raise Error("h2: not enough buffered data")
+        var should_update = (
+            n > 0 and not self.streams[stream_id].closed_by_peer()
+        )
+        if should_update:
+            self._ensure_output_capacity(FRAME_HEADER_LEN + 4)
+
+        var out = List[Byte](Span(self.streams[stream_id].data)[0:n])
+        var remaining = len(self.streams[stream_id].data)
+        var rest = List[Byte](Span(self.streams[stream_id].data)[n:remaining])
+        self.streams[stream_id].data = rest^
+        if should_update:
+            self.streams[stream_id].recv_window += n
+            var inc = List[Byte](capacity=4)
+            put_u32_be(inc, UInt32(n))
+            self._queue_frame_unchecked(FRAME_WINDOW_UPDATE, 0, stream_id, inc)
+        return out^
+
+    def take_data(mut self, stream_id: UInt32, n: Int) raises -> List[Byte]:
+        """Consumes exactly n bytes through the blocking compatibility path.
+
+        Incoming frames are processed until enough data is buffered. Taking
+        bytes replenishes the peer's stream window, and the queued
+        WINDOW_UPDATE is flushed before this method returns.
 
         Args:
             stream_id: The stream to read from.
@@ -1204,21 +1460,14 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             errors, or on connection-level protocol errors while processing
             frames.
         """
+        if n < 0:
+            raise Error("h2: negative data length")
         while True:
             self._ensure_stream(stream_id)
             if len(self.streams[stream_id].data) >= n:
-                var out = List[Byte](Span(self.streams[stream_id].data)[0:n])
-                var remaining = len(self.streams[stream_id].data)
-                var rest = List[Byte](
-                    Span(self.streams[stream_id].data)[n:remaining]
-                )
-                self.streams[stream_id].data = rest^
-                # Consume-driven stream window refill (backpressure).
-                if n > 0 and not self.streams[stream_id].closed_by_peer():
-                    self.streams[stream_id].recv_window += n
-                    var inc = List[Byte](capacity=4)
-                    put_u32_be(inc, UInt32(n))
-                    self._write_frame(FRAME_WINDOW_UPDATE, 0, stream_id, inc)
+                self.flush_output()
+                var out = self.take_buffered_data(stream_id, n)
+                self.flush_output()
                 return out^
             if self.streams[stream_id].closed_by_peer():
                 raise Error("h2: stream ended before enough data")
