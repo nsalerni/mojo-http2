@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.3 - 2026-08-22
+
 - Added safe stream retirement after both directions close or reset and all
   buffered DATA is consumed, with retired IDs preserved as closed per RFC 9113.
 
