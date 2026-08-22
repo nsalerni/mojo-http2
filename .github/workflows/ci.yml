@@ -55,6 +55,9 @@ jobs:
       - name: Compatibility suite (python-hpack, hyperframe, hyper-h2, h2spec)
         run: pixi run compliance
 
+      - name: Verify published h2spec badge is current
+        run: git diff --exit-code -- h2spec-badge.json
+
       - name: Upload compatibility report
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,6 +66,7 @@ jobs:
           path: |
             COMPLIANCE.md
             COMPLIANCE.html
+            h2spec-badge.json
 
   package:
     name: package (${{ matrix.os }})
