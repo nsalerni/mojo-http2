@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.4 - 2026-08-22
+
 - Added an optional per-call frame dispatch budget to `feed_input`, with
   ordered empty-input resume and unchanged unlimited behavior by default.
 
