@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added safe stream retirement after both directions close or reset and all
+  buffered DATA is consumed, with retired IDs preserved as closed per RFC 9113.
+
 ## 0.2.2 - 2026-08-22
 
 - Added stateful `process_frame` dispatch for readiness-driven callers while

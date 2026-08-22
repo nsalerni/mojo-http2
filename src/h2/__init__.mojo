@@ -22,7 +22,8 @@ The design is single-threaded and caller-driven: there is no event loop.
 Readiness-driven callers pass received bytes to `Http2Connection.feed_input`,
 use the `queue_*` methods, and take serialized output. Blocking callers use
 `process_next_frame`, the `wait_*` helpers, and the existing `send_*` methods,
-which synchronously flush the same bounded FIFO.
+which synchronously flush the same bounded FIFO. Callers release consumed,
+fully closed stream state with `retire_stream`.
 
 Conformance is verified with h2spec in cleartext and TLS modes.
 """
