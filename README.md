@@ -65,7 +65,9 @@ flow-control windows. Readiness-driven callers take queued bytes with
 methods, which flush the same FIFO through `IOStream.write_all`.
 `take_buffered_data` consumes receive bytes and queues stream-level
 WINDOW_UPDATE without reading or writing; `take_data` remains its blocking
-compatibility wrapper.
+compatibility wrapper. Once a stream is reset or closed in both directions and
+its buffered DATA has been consumed, `retire_stream` releases its application
+state. Retired stream IDs remain closed for RFC 9113 frame classification.
 
 Errors follow §5.4: connection errors send GOAWAY with the correct code,
 stream errors send RST_STREAM and the connection continues. The
@@ -104,6 +106,8 @@ pixi run example-h2c-loopback
   blocks, HPACK dynamic state, and illegal CONTINUATION sequences.
 - Queued automatic responses are compared with hyper-h2, and hyper-h2 consumes
   queued HEADERS plus flow-controlled DATA as an independent wire oracle.
+- Sequential churn across 4,096 hyper-h2 streams verifies that explicit
+  retirement bounds live state while late frames retain closed-stream handling.
 - TLS transport is checked in both roles against **CPython ssl**, including
   certificate verification, `h2` ALPN selection, and ALPN rejection.
 - The flood/abuse guards have dedicated unit tests (h2spec does not cover

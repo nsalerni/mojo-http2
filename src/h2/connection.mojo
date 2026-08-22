@@ -191,7 +191,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     var streams: Dict[UInt32, StreamState]
     """Per-stream receive state, keyed by stream id."""
     var stream_ids: List[UInt32]
-    """Insertion-ordered ids (Dict with move-only values can't iterate)."""
+    """Insertion-ordered live ids (Dict with move-only values can't iterate)."""
+    var _streams_opened: Int
+    """Total state records created, retained for rapid-reset accounting."""
     var goaway_code: Optional[UInt32]
     """Error code from a received GOAWAY, if any."""
     var goaway_last_stream: UInt32
@@ -272,6 +274,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.send_window = DEFAULT_WINDOW_SIZE
         self.streams = Dict[UInt32, StreamState]()
         self.stream_ids = List[UInt32]()
+        self._streams_opened = 0
         self.goaway_code = None
         self.goaway_last_stream = 0
         self.highest_remote_stream = 0
@@ -432,6 +435,53 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 id, Int(self.peer_settings.initial_window_size)
             )
             self.stream_ids.append(id)
+            self._streams_opened += 1
+
+    def retire_stream(mut self, stream_id: UInt32) raises -> Bool:
+        """Removes application state for a completed stream when safe.
+
+        A stream is eligible after it was reset, or after both endpoints sent
+        END_STREAM, and only once the application consumed all buffered DATA.
+        The connection's monotonic local and remote stream-id state remains,
+        so later frames on the retired id are classified as closed rather
+        than idle under RFC 9113 section 5.1.
+
+        Args:
+            stream_id: The completed stream whose state can be discarded.
+
+        Returns:
+            True when the state was removed. False when the stream is unknown,
+            still open or half-closed, or still has buffered DATA.
+
+        Raises:
+            If internal stream bookkeeping is inconsistent.
+        """
+        if stream_id not in self.streams:
+            return False
+        if len(self.streams[stream_id].data) != 0:
+            return False
+        if not (
+            Bool(self.streams[stream_id].reset_code)
+            or (
+                self.streams[stream_id].local_end
+                and self.streams[stream_id].end_stream
+            )
+        ):
+            return False
+
+        var remaining = List[UInt32](capacity=len(self.stream_ids))
+        var matches = 0
+        for id in self.stream_ids:
+            if id == stream_id:
+                matches += 1
+            else:
+                remaining.append(id)
+        if matches != 1:
+            raise Error("h2: inconsistent live stream bookkeeping")
+
+        _ = self.streams.pop(stream_id)
+        self.stream_ids = remaining^
+        return True
 
     def open_stream(mut self) raises -> UInt32:
         """Allocates the next locally-initiated stream id.
@@ -728,6 +778,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
     def _stream_error(mut self, sid: UInt32, code: UInt32) raises:
         """Stream error: RST_STREAM with the code; connection continues."""
+        if self._is_closed(sid):
+            self.queue_rst_stream(sid, code)
+            return
         self._ensure_stream(sid)
         self.streams[sid].local_reset = True
         self.streams[sid].reset_code = code
@@ -750,6 +803,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         if peer_initiated:
             return sid > self.highest_remote_stream
         return sid >= self.next_stream_id
+
+    def _is_closed(self, sid: UInt32) -> Bool:
+        """True for a retired or implicitly closed non-idle stream id."""
+        return sid not in self.streams and not self._is_idle(sid)
 
     def queue_ping(mut self, data: UInt64) raises:
         """Queues a PING frame without performing transport I/O.
@@ -1023,9 +1080,13 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                     ERR_PROTOCOL_ERROR, String("RST_STREAM on idle stream")
                 )
             var code = get_u32_be(Span(frame_payload), 0)
+            if self._is_closed(h.stream_id):
+                # RST_STREAM on an already closed stream has no effect.
+                return
             self.rst_received += 1
-            if self.rst_received > 512 and self.rst_received * 2 > len(
-                self.stream_ids
+            if (
+                self.rst_received > 512
+                and self.rst_received * 2 > self._streams_opened
             ):
                 # Rapid-reset (CVE-2023-44487)-style churn guard.
                 self._conn_error(
@@ -1151,6 +1212,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self._conn_error(
                 ERR_PROTOCOL_ERROR, String("WINDOW_UPDATE on idle stream")
             )
+        if self._is_closed(h.stream_id):
+            # RFC 9113 section 5.1 permits this race after stream closure.
+            return
         self._ensure_stream(h.stream_id)
         if self.streams[h.stream_id].send_window + increment > 0x7FFFFFFF:
             self._stream_error(h.stream_id, ERR_FLOW_CONTROL_ERROR)
@@ -1165,6 +1229,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self._conn_error(ERR_PROTOCOL_ERROR, String("DATA on stream 0"))
         if self._is_idle(h.stream_id):
             self._conn_error(ERR_PROTOCOL_ERROR, String("DATA on idle stream"))
+        if self._is_closed(h.stream_id):
+            # Preserve closed-vs-idle classification without recreating the
+            # retired state record.
+            self.queue_rst_stream(h.stream_id, ERR_STREAM_CLOSED)
+            return
         # Flow control counts the whole frame payload, padding included.
         self.recv_window -= h.length
         if self.recv_window < 0:
@@ -1229,6 +1298,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         """Starts a HEADERS block and finishes it when END_HEADERS is set."""
         if h.stream_id == 0:
             self._conn_error(ERR_PROTOCOL_ERROR, String("HEADERS on stream 0"))
+        if self._is_closed(h.stream_id):
+            self._conn_error(
+                ERR_STREAM_CLOSED, String("HEADERS on closed stream")
+            )
         var peer_initiated = (h.stream_id % 2 == 1) != self.is_client
         var is_new = h.stream_id not in self.streams
         if is_new and peer_initiated:

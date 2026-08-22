@@ -402,7 +402,97 @@ def test_rst_stream_received() raises:
     server.close()
 
 
-# --- 18. Flood guards (ENHANCE_YOUR_CALM) ---
+# --- 18. Safe stream retirement ---
+
+
+def test_stream_retirement_requires_complete_consumed_state() raises:
+    var pair = make_pair()
+    ref client = pair.client
+    ref server = pair.server
+
+    var sid = client.open_stream()
+    var req_headers = [
+        hf(":method", "POST"),
+        hf(":scheme", "http"),
+        hf(":path", "/retire"),
+    ]
+    client.send_headers(sid, Span(req_headers), end_stream=False)
+    client.send_data(sid, String("abc").as_bytes(), end_stream=True)
+    server.wait_stream_end(sid)
+
+    # The peer is done, but this side is still half-closed and has DATA that
+    # the application has not consumed.
+    assert_false(server.retire_stream(sid), "half-closed stream stays live")
+    var response = [hf(":status", "204")]
+    server.send_headers(sid, Span(response), end_stream=True)
+    assert_false(server.retire_stream(sid), "buffered DATA prevents retirement")
+
+    assert_equal(String(from_utf8=server.take_buffered_data(sid, 3)), "abc")
+    assert_true(server.retire_stream(sid), "consumed closed stream retires")
+    assert_false(sid in server.streams, "retired state is removed")
+    assert_equal(len(server.stream_ids), 0)
+    assert_false(server.retire_stream(sid), "retirement is idempotent")
+
+    client.wait_stream_end(sid)
+    client.stream_ids.append(sid)
+    var duplicate_raised = False
+    try:
+        _ = client.retire_stream(sid)
+    except error:
+        duplicate_raised = True
+        assert_true(
+            "inconsistent live stream" in String(error), String(error)
+        )
+    assert_true(duplicate_raised, "duplicate live id must raise")
+    assert_true(sid in client.streams, "failed retirement preserves state")
+    assert_equal(len(client.stream_ids), 2)
+
+    _ = client.stream_ids.pop()
+    client.stream_ids = List[UInt32]()
+    var missing_raised = False
+    try:
+        _ = client.retire_stream(sid)
+    except error:
+        missing_raised = True
+        assert_true(
+            "inconsistent live stream" in String(error), String(error)
+        )
+    assert_true(missing_raised, "missing live id must raise")
+    assert_true(sid in client.streams, "failed retirement remains atomic")
+    assert_equal(len(client.stream_ids), 0)
+
+    client.stream_ids.append(sid)
+    assert_true(client.retire_stream(sid), "client closed stream retires")
+    assert_equal(len(client.stream_ids), 0)
+    client.close()
+    server.close()
+
+
+def test_reset_stream_can_retire_after_data_is_consumed() raises:
+    var pair = make_pair()
+    ref client = pair.client
+    ref server = pair.server
+
+    var sid = client.open_stream()
+    var req_headers = [
+        hf(":method", "POST"),
+        hf(":scheme", "http"),
+        hf(":path", "/reset-retire"),
+    ]
+    client.send_headers(sid, Span(req_headers), end_stream=False)
+    server.wait_headers(sid)
+    server.send_rst_stream(sid, ERR_CANCEL)
+    while not Bool(client.streams[sid].reset_code):
+        client.process_next_frame()
+
+    assert_true(client.retire_stream(sid), "peer-reset stream retires")
+    assert_false(sid in client.streams, "reset state is removed")
+    assert_equal(len(client.stream_ids), 0)
+    client.close()
+    server.close()
+
+
+# --- 19. Flood guards (ENHANCE_YOUR_CALM) ---
 
 
 def test_ping_flood_guard() raises:
@@ -475,7 +565,7 @@ def test_rapid_reset_flood_guard() raises:
     server.close()
 
 
-# --- 19. Server-role bad preface ---
+# --- 20. Server-role bad preface ---
 
 
 def test_server_rejects_bad_preface() raises:
@@ -518,6 +608,8 @@ def main() raises:
     test_take_and_wait_on_short_stream()
     test_goaway_blocks_open_stream()
     test_rst_stream_received()
+    test_stream_retirement_requires_complete_consumed_state()
+    test_reset_stream_can_retire_after_data_is_consumed()
     test_ping_flood_guard()
     test_rapid_reset_flood_guard()
     test_server_rejects_bad_preface()

@@ -756,7 +756,84 @@ def section_h2_dispatch(tmp: Path):
         tool_ok = False
         detail = detail or "dispatch probe emitted malformed case output"
 
-    def record_cases(label, names):
+    # Build a long sequence with a strict hyper-h2 client and server. Each
+    # response is fed to a fresh Mojo stream, consumed, and explicitly
+    # retired by the probe before the next stream opens.
+    churn_count = 4096
+    client = h2.connection.H2Connection(config=h2.config.H2Configuration(
+        client_side=True, header_encoding="utf-8"
+    ))
+    server = h2.connection.H2Connection(config=h2.config.H2Configuration(
+        client_side=False, header_encoding="utf-8"
+    ))
+    client.initiate_connection()
+    server.initiate_connection()
+    server.receive_data(client.data_to_send())
+    server_startup = server.data_to_send()
+    client.receive_data(server_startup)
+    server.receive_data(client.data_to_send())
+    response_chunks = []
+    for index in range(churn_count):
+        stream_id = client.get_next_available_stream_id()
+        client.send_headers(
+            stream_id,
+            [
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":path", "/retire"),
+                (":authority", "localhost"),
+            ],
+            end_stream=True,
+        )
+        server.receive_data(client.data_to_send())
+        server.send_headers(stream_id, [(":status", "200")])
+        server.send_data(stream_id, b"x", end_stream=True)
+        response = server.data_to_send()
+        client.receive_data(response)
+        response_chunks.append((settings if index == 0 else b"") + response)
+    stale = hf.DataFrame(1, data=b"late")
+    reference_closed = False
+    try:
+        stale_events = client.receive_data(stale.serialize())
+        reference_reset = hf.RstStreamFrame(1, error_code=5).serialize()
+        reference_closed = (
+            not stale_events and client.data_to_send() == reference_reset
+        )
+    except h2.exceptions.ProtocolError:
+        pass
+
+    retirement_in = tmp / "h2_retirement_in.txt"
+    retirement_out = tmp / "h2_retirement_out.txt"
+    retirement_in.write_text(
+        f"COUNT {churn_count}\n"
+        + "".join(
+            f"STREAM {2 * index + 1} {wire.hex()}\n"
+            for index, wire in enumerate(response_chunks)
+        )
+        + f"STALE {stale.serialize().hex()}\n"
+    )
+    retirement_result = run_tool(
+        "h2_retirement_tool", retirement_in, retirement_out, timeout=180
+    )
+    retirement_text = (
+        retirement_out.read_text().strip()
+        if retirement_result.returncode == 0 and retirement_out.exists()
+        else ""
+    )
+    retirement_expected = (
+        f"completed={churn_count} live=0 max_live=1 rst=5"
+    )
+    retirement_ok = (
+        reference_closed
+        and retirement_result.returncode == 0
+        and retirement_text == retirement_expected
+    )
+    retirement_detail = (
+        f"reference_closed={reference_closed} mojo={retirement_text!r} "
+        f"stderr={retirement_result.stderr[:200]!r}"
+    )
+
+    def record_cases(label, names, extra_result=None):
         if not names:
             record("h2", label, False, "compliance case selection was empty")
             return
@@ -797,6 +874,9 @@ def section_h2_dispatch(tmp: Path):
                     f"want {want_output} got {got_output}"
                 )
                 break
+        if ok and extra_result is not None and not extra_result[0]:
+            ok = False
+            why = extra_result[1]
         record("h2", label, ok, why)
 
     record_cases(
@@ -804,8 +884,12 @@ def section_h2_dispatch(tmp: Path):
         ["split-two", "split-three", "complete"],
     )
     record_cases(
-        "process_frame preserves HPACK dynamic state across streams",
+        (
+            "process_frame preserves HPACK state and bounds live state across "
+            f"{churn_count} retired hyper-h2 streams"
+        ),
         ["dynamic-two-streams"],
+        (retirement_ok, retirement_detail),
     )
     record_cases(
         "process_frame queues SETTINGS and PING acknowledgements matching hyper-h2",
