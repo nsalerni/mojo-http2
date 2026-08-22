@@ -49,6 +49,9 @@ jobs:
       - name: Unit tests
         run: pixi run test
 
+      - name: Incremental h2c loopback example
+        run: pixi run example-h2c-loopback
+
       - name: Benchmarks (smoke)
         run: pixi run bench-smoke
 

@@ -73,6 +73,18 @@ single-threaded, caller-driven API is the same over h2c, Unix sockets, and
 TLS. `H2TLSContext` configures the mandatory `h2` ALPN token and rejects a
 peer that does not negotiate it.
 
+## Example
+
+`examples/h2c_loopback.mojo` drives a cleartext client and server through the
+incremental API without hidden transport I/O. It splits startup, request, and
+response bytes across small feeds so the queue and partial-input behavior is
+visible in one file.
+
+```sh
+python3 tools/fetch_deps.py
+pixi run example-h2c-loopback
+```
+
 ## Verification
 
 - **h2spec: all 146 cases pass in cleartext and TLS modes** (RFC 9113 + RFC 7541 sections).
