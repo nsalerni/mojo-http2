@@ -427,6 +427,101 @@ def section_h2_incremental(tmp: Path):
     )
 
 
+def section_h2_transport_input(tmp: Path):
+    print("== incremental h2 connection startup vs hyper-h2 ==")
+    import h2.config
+    import h2.connection
+    import h2.events
+
+    reference = h2.connection.H2Connection(config=h2.config.H2Configuration(
+        client_side=True, header_encoding="utf-8"
+    ))
+    reference.initiate_connection()
+    wire = reference.data_to_send()
+
+    cases: list[tuple[str, list[bytes]]] = []
+    for split in range(len(wire) + 1):
+        cases.append((f"split-{split}", [wire[:split], wire[split:]]))
+    cases.append(("one-byte", [wire[i:i + 1] for i in range(len(wire))]))
+
+    infile = tmp / "h2t_in.txt"
+    outfile = tmp / "h2t_out.txt"
+    lines = []
+    for name, chunks in cases:
+        lines.append(f"CASE {name}")
+        lines.extend(chunk.hex() for chunk in chunks if chunk)
+        lines.append("END")
+    infile.write_text("\n".join(lines) + "\n")
+
+    result = run_tool("h2_transport_tool", infile, outfile, timeout=120)
+    tool_ok = result.returncode == 0
+    detail = result.stderr[:300]
+    parsed: dict[str, tuple[bool, bool, int, bytes]] = {}
+    if tool_ok:
+        current = ""
+        try:
+            for line in outfile.read_text().splitlines():
+                if line.startswith("CASE "):
+                    current = line[5:]
+                elif line.startswith("STATE ") and current:
+                    _, preface, settings, pending, output = line.split(" ")
+                    parsed[current] = (
+                        preface == "True",
+                        settings == "True",
+                        int(pending),
+                        bytes.fromhex(output),
+                    )
+                    current = ""
+                else:
+                    raise ValueError(f"unexpected probe line: {line!r}")
+            if current or sorted(parsed) != sorted(name for name, _ in cases):
+                raise ValueError("missing or duplicate transport cases")
+        except ValueError as error:
+            tool_ok = False
+            detail = f"incremental transport probe parse failed: {error}"
+
+    def validate(members):
+        ok = tool_ok
+        why = detail
+        for name, _ in members:
+            state = parsed.get(name)
+            if state is None or state[:3] != (True, True, 0):
+                return False, f"{name}: incomplete Mojo state {state}"
+            client = h2.connection.H2Connection(
+                config=h2.config.H2Configuration(
+                    client_side=True, header_encoding="utf-8"
+                )
+            )
+            client.initiate_connection()
+            client.data_to_send()
+            try:
+                events = client.receive_data(state[3])
+            except Exception as error:
+                return False, f"{name}: hyper-h2 rejected output: {error!r}"
+            if not any(isinstance(e, h2.events.RemoteSettingsChanged) for e in events):
+                return False, f"{name}: server SETTINGS missing"
+            if not any(isinstance(e, h2.events.SettingsAcknowledged) for e in events):
+                return False, f"{name}: client SETTINGS acknowledgement missing"
+        return ok, why
+
+    split_cases = [case for case in cases if case[0].startswith("split-")]
+    ok, why = validate(split_cases)
+    record(
+        "h2",
+        f"connection startup accepts hyper-h2 bytes at every split point ({len(split_cases)} plans)",
+        ok,
+        why,
+    )
+    one_byte = [case for case in cases if case[0] == "one-byte"]
+    ok, why = validate(one_byte)
+    record(
+        "h2",
+        f"one-byte startup feeds preserve all {len(wire)} hyper-h2 bytes",
+        ok,
+        why,
+    )
+
+
 def section_h2_dispatch(tmp: Path):
     print("== stateful h2 frame dispatch vs hyper-h2 ==")
     import h2.config
@@ -746,12 +841,6 @@ def section_h2_output_queue(tmp: Path):
             detail = f"queued output probe parse failed: {error}"
 
     if ok:
-        client = h2.connection.H2Connection(config=h2.config.H2Configuration(
-            client_side=True, header_encoding="utf-8"
-        ))
-        client.initiate_connection()
-        client_preface = client.data_to_send()
-
         server = h2.connection.H2Connection(config=h2.config.H2Configuration(
             client_side=False, header_encoding="utf-8"
         ))
@@ -761,7 +850,7 @@ def section_h2_output_queue(tmp: Path):
         body = bytearray()
         ended = False
         try:
-            for event in server.receive_data(client_preface + wire):
+            for event in server.receive_data(wire):
                 if isinstance(event, h2.events.RequestReceived):
                     headers = list(event.headers)
                 elif isinstance(event, h2.events.DataReceived):
@@ -1430,6 +1519,7 @@ def main() -> int:
         section_hpack(tmp)
         section_h2_frames(tmp)
         section_h2_incremental(tmp)
+        section_h2_transport_input(tmp)
         section_h2_dispatch(tmp)
         section_h2_output_queue(tmp)
         section_h2_live(tmp)

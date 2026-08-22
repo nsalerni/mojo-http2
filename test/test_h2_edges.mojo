@@ -49,9 +49,10 @@ def make_pair() raises -> ConnPair:
     var listener = TCPListener("127.0.0.1", 0)
     var client_tcp = TCPStream.connect("127.0.0.1", listener.local_port)
     var server_tcp = listener.accept()
-    # Client ctor writes preface+SETTINGS; server ctor reads them.
+    # Construction queues startup bytes without reading or writing sockets.
     var client = Http2Connection(client_tcp^, is_client=True)
     var server = Http2Connection(server_tcp^, is_client=False)
+    client.flush_output()
     # Let each side process the peer's SETTINGS (and ACK it).
     server.process_next_frame()  # client SETTINGS
     client.process_next_frame()  # server SETTINGS
@@ -487,6 +488,7 @@ def test_server_rejects_bad_preface() raises:
     var raised = False
     try:
         var server = Http2Connection(server_tcp^, is_client=False)
+        server.process_next_frame()
         server.close()
     except err:
         raised = True

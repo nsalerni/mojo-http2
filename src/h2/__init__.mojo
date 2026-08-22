@@ -18,11 +18,11 @@ stream. `secure` provides `H2TLSContext`, which requires `h2` ALPN and
 specializes the same connection over mojo-tls.
 
 Depends on `hpack`, `net`, and `tls`; extractable as a standalone package.
-The design is single-threaded and caller-driven: there is no event loop;
-callers can dispatch decoded frames with `Http2Connection.process_frame`, or
-pump a blocking stream with `process_next_frame` and the `wait_*` helpers.
-Readiness-driven callers use the `queue_*` methods and take serialized output;
-the existing `send_*` methods synchronously flush the same bounded FIFO.
+The design is single-threaded and caller-driven: there is no event loop.
+Readiness-driven callers pass received bytes to `Http2Connection.feed_input`,
+use the `queue_*` methods, and take serialized output. Blocking callers use
+`process_next_frame`, the `wait_*` helpers, and the existing `send_*` methods,
+which synchronously flush the same bounded FIFO.
 
 Conformance is verified with h2spec in cleartext and TLS modes.
 """

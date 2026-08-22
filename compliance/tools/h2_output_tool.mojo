@@ -9,7 +9,7 @@ from testutil import to_hex
 
 
 struct SinkStream(IOStream):
-    """An IOStream that discards constructor output and permits no reads."""
+    """An IOStream that rejects hidden startup reads or writes."""
 
     def __init__(out self):
         pass
@@ -20,6 +20,7 @@ struct SinkStream(IOStream):
 
     def write_all(self, data: Span[Byte, _]) raises:
         _ = data
+        raise Error("output probe performed an unexpected write")
 
     def set_read_timeout(self, nanos: Int64) raises:
         _ = nanos

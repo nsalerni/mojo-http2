@@ -28,19 +28,25 @@ release.
 
 ## h2 (`src/h2`)
 
-HTTP/2 framing and connection state machine over blocking `IOStream`
-transports: full frame codec, connection preface and SETTINGS negotiation,
+HTTP/2 framing and connection state machine over `IOStream` transports: full
+frame codec, incremental connection preface and SETTINGS negotiation,
 stream multiplexing with the §5.1 state machine, request-header validation
 (§8), flow control
 with consume-driven backpressure, and the standard abuse mitigations
 (rapid-reset accounting per CVE-2023-44487, PING/SETTINGS flood limits,
 concurrency and header-size caps).
 
-`IncrementalFrameDecoder` accepts arbitrarily split or coalesced wire bytes
-and returns complete `Frame` values in order. It retains only the incomplete
-header or payload between calls and rejects an oversized declared length as
-soon as the nine-byte header is complete. This is the framing primitive for
-readiness-driven transports; connection dispatch remains caller-driven.
+`Http2Connection` construction does not read from or write to its transport.
+Client startup bytes enter the outbound queue immediately. A server validates
+the 24-byte client preface through `feed_input`, then queues its SETTINGS.
+`feed_input` accepts prefaces and frames split at any byte boundary, dispatches
+complete frames in wire order, and leaves automatic responses for the caller
+to drain. `process_next_frame` preserves the blocking compatibility path.
+
+`IncrementalFrameDecoder` remains available for callers that need framing
+without connection dispatch. It retains only an incomplete header or payload
+and rejects an oversized declared length as soon as the nine-byte header is
+complete.
 
 `Http2Connection.process_frame` validates and dispatches one complete frame
 without reading from the transport. Fragmented header blocks remain in
@@ -78,6 +84,9 @@ peer that does not negotiate it.
 - Incremental frame decoding is checked against hyperframe bytes at every
   split point, one byte at a time, as coalesced input, and with seeded
   fragmentation of a 16 KiB DATA frame.
+- Incremental connection startup is checked against hyper-h2 at every preface
+  and SETTINGS split point, one byte at a time, with a transport that rejects
+  hidden reads and writes.
 - Direct frame dispatch is checked against hyper-h2 for fragmented header
   blocks, HPACK dynamic state, and illegal CONTINUATION sequences.
 - Queued automatic responses are compared with hyper-h2, and hyper-h2 consumes

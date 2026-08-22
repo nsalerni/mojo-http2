@@ -27,7 +27,7 @@ struct RejectingStream(IOStream):
     var reject_writes: Bool
 
     def __init__(out self):
-        self.reject_writes = False
+        self.reject_writes = True
 
     def read_exact(self, n: Int) raises -> List[Byte]:
         _ = n
@@ -49,7 +49,9 @@ struct RejectingStream(IOStream):
 
 
 def make_client() raises -> Http2Connection[RejectingStream]:
-    return Http2Connection(RejectingStream(), is_client=True)
+    var conn = Http2Connection(RejectingStream(), is_client=True)
+    _ = conn.take_pending_output()
+    return conn^
 
 
 def make_frame(
@@ -67,6 +69,96 @@ def make_frame(
         ),
         payload=payload^,
     )
+
+
+def test_incremental_startup_and_every_split_point() raises:
+    # Client preface followed by an empty SETTINGS frame produced by
+    # hyper-h2's initiate_connection().
+    var preface = from_hex(
+        "505249202a20485454502f322e300d0a0d0a534d0d0a0d0a"
+    )
+    var settings = from_hex("000000040000000000")
+    var wire = preface.copy()
+    wire.extend(Span(settings))
+    var expected_server_output = (
+        "00000c040000000000000300000100000600004000"
+        "000000040100000000"
+    )
+
+    for split in range(len(wire) + 1):
+        var server = Http2Connection(RejectingStream(), is_client=False)
+        assert_equal(server.pending_output_len(), 0)
+        _ = server.feed_input(Span(wire)[0:split])
+        _ = server.feed_input(Span(wire)[split : len(wire)])
+        assert_true(server.input_preface_complete())
+        assert_true(server.peer_settings_received)
+        assert_equal(server.pending_input_frame_count(), 0)
+        var output = server.take_pending_output()
+        assert_equal(to_hex(Span(output)), expected_server_output)
+
+    var bytewise = Http2Connection(RejectingStream(), is_client=False)
+    for i in range(len(wire)):
+        _ = bytewise.feed_input(Span(wire)[i : i + 1])
+    assert_true(bytewise.input_preface_complete())
+    assert_true(bytewise.peer_settings_received)
+    var output = bytewise.take_pending_output()
+    assert_equal(to_hex(Span(output)), expected_server_output)
+
+    var partial = Http2Connection(RejectingStream(), is_client=False)
+    _ = partial.feed_input(Span(preface)[0:1])
+    partial.max_pending_output_size = 0
+    _ = partial.feed_input(Span(preface)[0:0])
+    assert_false(partial.input_preface_complete())
+
+    var backpressured = Http2Connection(RejectingStream(), is_client=False)
+    _ = backpressured.feed_input(Span(preface))
+    backpressured.max_pending_output_size = 21
+    assert_equal(backpressured.feed_input(Span(settings)), 0)
+    assert_equal(backpressured.pending_input_frame_count(), 1)
+    _ = backpressured.take_pending_output()
+    backpressured.max_pending_output_size = 26
+    var empty = List[Byte]()
+    assert_equal(backpressured.feed_input(Span(empty)), 1)
+    assert_equal(backpressured.pending_input_frame_count(), 0)
+    output = backpressured.take_pending_output()
+    assert_equal(to_hex(Span(output)), "000000040100000000")
+
+
+def test_client_startup_is_queued_without_writes() raises:
+    var client = Http2Connection(RejectingStream(), is_client=True)
+    assert_true(client.input_preface_complete())
+    var output = client.take_pending_output()
+    assert_equal(
+        to_hex(Span(output)),
+        (
+            "505249202a20485454502f322e300d0a0d0a534d0d0a0d0a"
+            "00000c040000000000000300000100000600004000"
+        ),
+    )
+
+
+def test_incremental_connection_error_is_terminal() raises:
+    var client = make_client()
+    # PING has a valid eight-byte payload but illegally targets stream 1.
+    var malformed = from_hex(
+        "0000080600000000013132333435363738"
+    )
+    var raised = False
+    try:
+        _ = client.feed_input(Span(malformed))
+    except error:
+        raised = True
+        assert_true("PING on stream" in String(error), String(error))
+    assert_true(raised, "connection error must raise")
+
+    var empty = List[Byte]()
+    raised = False
+    try:
+        _ = client.feed_input(Span(empty))
+    except error:
+        raised = True
+        assert_true("incremental input is failed" in String(error), String(error))
+    assert_true(raised, "connection error must reject later input")
 
 
 def test_automatic_responses_queue_without_writes() raises:
@@ -295,6 +387,9 @@ def test_failed_flush_retains_output() raises:
 
 
 def main() raises:
+    test_incremental_startup_and_every_split_point()
+    test_client_startup_is_queued_without_writes()
+    test_incremental_connection_error_is_terminal()
     test_automatic_responses_queue_without_writes()
     test_data_queues_connection_window_update()
     test_errors_queue_goaway_and_rst_stream()
