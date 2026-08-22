@@ -890,11 +890,116 @@ def section_h2_output_queue(tmp: Path):
     )
 
 
+def section_h2_enable_push(tmp: Path):
+    print("== SETTINGS_ENABLE_PUSH vs hyperframe ==")
+    import hyperframe.frame as hf
+
+    def parse_frame(wire: bytes):
+        if len(wire) < 9:
+            raise ValueError("short frame header")
+        frame, length = hf.Frame.parse_frame_header(memoryview(wire[:9]))
+        if len(wire) != 9 + length:
+            raise ValueError("frame length mismatch")
+        frame.parse_body(memoryview(wire[9:]))
+        return frame
+
+    cases = []
+    for role in ("CLIENT", "SERVER"):
+        for value in (0, 1, 2):
+            frame = hf.SettingsFrame(
+                0, settings={hf.SettingsFrame.ENABLE_PUSH: value}
+            )
+            cases.append((role, value, frame.serialize()))
+
+    infile = tmp / "h2_push_settings_in.txt"
+    outfile = tmp / "h2_push_settings_out.txt"
+    infile.write_text("".join(
+        f"{role} {value} {wire.hex()}\n" for role, value, wire in cases
+    ))
+    result = run_tool("h2_push_settings_tool", infile, outfile, timeout=120)
+    lines = outfile.read_text().splitlines() if result.returncode == 0 else []
+    startup_ok = len(lines) == 7 and lines[0].startswith("STARTUP ")
+    startup_detail = result.stderr[:300]
+    if startup_ok:
+        try:
+            startup = bytes.fromhex(lines[0].split()[1])
+            if not startup.startswith(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"):
+                raise ValueError("missing client connection preface")
+            settings = parse_frame(startup[24:])
+            startup_ok = (
+                isinstance(settings, hf.SettingsFrame)
+                and "ACK" not in settings.flags
+                and settings.settings.get(hf.SettingsFrame.ENABLE_PUSH) == 0
+            )
+            if not startup_ok:
+                startup_detail = f"unexpected initial SETTINGS: {settings!r}"
+        except Exception as error:
+            startup_ok = False
+            startup_detail = f"hyperframe rejected client startup: {error!r}"
+    record(
+        "h2",
+        "hyperframe decodes client startup with SETTINGS_ENABLE_PUSH=0",
+        startup_ok,
+        startup_detail,
+    )
+
+    role_ok = len(lines) == 7
+    role_detail = result.stderr[:300]
+    parsed = {}
+    if role_ok:
+        try:
+            for line in lines[1:]:
+                role, value, status, goaway, wire_hex = line.split()
+                parsed[(role, int(value))] = (
+                    status,
+                    goaway == "True",
+                    parse_frame(bytes.fromhex(wire_hex)),
+                )
+        except Exception as error:
+            role_ok = False
+            role_detail = f"ENABLE_PUSH probe output parse failed: {error!r}"
+
+    if role_ok:
+        for role, value, _ in cases:
+            status, sent_goaway, output = parsed.get(
+                (role, value), (None, None, None)
+            )
+            rejected = role == "CLIENT" or value > 1
+            if rejected:
+                valid = (
+                    status == "ERROR"
+                    and sent_goaway
+                    and isinstance(output, hf.GoAwayFrame)
+                    and output.error_code == 1
+                )
+            else:
+                valid = (
+                    status == "OK"
+                    and not sent_goaway
+                    and isinstance(output, hf.SettingsFrame)
+                    and "ACK" in output.flags
+                    and not output.settings
+                )
+            if not valid:
+                role_ok = False
+                role_detail = (
+                    f"{role} value {value}: status={status} "
+                    f"goaway={sent_goaway} output={output!r}"
+                )
+                break
+    record(
+        "h2",
+        "hyperframe-built ENABLE_PUSH frames obey endpoint role rules",
+        role_ok,
+        role_detail,
+    )
+
+
 def h2_reference_echo_server(
     sock: socket.socket, result: dict, tls_context: ssl.SSLContext | None = None
 ):
     """Reference hyper-h2 echo server for one connection; strict validation."""
-    import h2.connection, h2.config, h2.events
+    import h2.connection, h2.config, h2.events, h2.settings
     try:
         conn_sock, _ = sock.accept()
         conn_sock.settimeout(30)
@@ -903,6 +1008,10 @@ def h2_reference_echo_server(
             result["alpn"] = conn_sock.selected_alpn_protocol()
         config = h2.config.H2Configuration(client_side=False, header_encoding="utf-8")
         conn = h2.connection.H2Connection(config=config)
+        # hyper-h2 retains the RFC 7540 server default for ENABLE_PUSH.
+        # RFC 9113 forbids servers from sending that setting, so remove it
+        # from this reference peer before its initial SETTINGS is serialized.
+        del conn.local_settings._settings[h2.settings.SettingCodes.ENABLE_PUSH]
         conn.initiate_connection()
         conn_sock.sendall(conn.data_to_send())
         bodies: dict[int, bytearray] = {}
@@ -1571,6 +1680,7 @@ def main() -> int:
         section_h2_transport_input(tmp)
         section_h2_dispatch(tmp)
         section_h2_output_queue(tmp)
+        section_h2_enable_push(tmp)
         section_h2_live(tmp)
         section_h2_tls(tmp)
         section_h2spec(tmp)
