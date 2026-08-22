@@ -62,11 +62,11 @@ code { font-family: var(--mono); font-size: 0.92em; }
 <header>
 <p class="eyebrow">mojo-http2 &middot; differential compliance run</p>
 <h1>HPACK and HTTP/2 checked against the tools that reject violations</h1>
-<div class="verdict"><span class="score">29/29</span><span>checks passed</span><span class="when">2026-08-22 17:03 UTC</span></div>
+<div class="verdict"><span class="score">30/30</span><span>checks passed</span><span class="when">2026-08-22 17:28 UTC</span></div>
 <p class="thesis">No self-grading: header compression is judged by python-hpack in both directions, frames byte-for-byte by hyperframe, live connections by strict hyper-h2 peers, TLS by CPython ssl, and the full RFC 9113/7541 surface by h2spec in cleartext and TLS modes.</p>
 <ul class="scorecard">
 <li>hpack <span class="n">5/5</span></li>
-<li>h2 <span class="n">20/20</span></li>
+<li>h2 <span class="n">21/21</span></li>
 <li>h2_tls <span class="n">4/4</span></li>
 </ul></header>
 <section>
@@ -94,6 +94,7 @@ code { font-family: var(--mono); font-size: 0.92em; }
 <tr><td>incomplete hyperframe suffix is retained without early output</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>connection startup accepts hyper-h2 bytes at every split point (76 plans)</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>one-byte startup feeds preserve all 75 hyper-h2 bytes</td><td class="result"><span class="pass">PASS</span></td></tr>
+<tr><td>one-frame dispatch budget preserves hyperframe wire order and hyper-h2 output</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>process_frame reassembles hyper-h2 header blocks across one or more CONTINUATION frames</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>process_frame preserves HPACK state and bounds live state across 4096 retired hyper-h2 streams</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>process_frame queues SETTINGS and PING acknowledgements matching hyper-h2</td><td class="result"><span class="pass">PASS</span></td></tr>

@@ -523,6 +523,43 @@ def section_h2_transport_input(tmp: Path):
         why,
     )
 
+    # Hyperframe supplies three coalesced frames. A one-frame dispatch budget
+    # must retain wire order across empty-input resume calls, and hyper-h2 must
+    # accept the automatic acknowledgements in that same order.
+    import hyperframe.frame as hf
+    settings = hf.SettingsFrame(0)
+    ping_a = hf.PingFrame(0)
+    ping_a.opaque_data = b"12345678"
+    ping_b = hf.PingFrame(0)
+    ping_b.opaque_data = b"ABCDEFGH"
+    coalesced = settings.serialize() + ping_a.serialize() + ping_b.serialize()
+    budget_in = tmp / "h2_budget_in.txt"
+    budget_out = tmp / "h2_budget_out.txt"
+    budget_in.write_text(coalesced.hex() + "\n")
+    result = run_tool("h2_budget_tool", budget_in, budget_out)
+    ok, why = result.returncode == 0, result.stderr[:300]
+    if ok:
+        rows = budget_out.read_text().splitlines()
+        expected_pending = [2, 1, 0]
+        automatic = bytearray()
+        try:
+            for index, row in enumerate(rows):
+                processed, pending, encoded = row.split(" ")
+                if (int(processed), int(pending)) != (1, expected_pending[index]):
+                    raise ValueError(f"row {index}: {row}")
+                automatic.extend(bytes.fromhex(encoded))
+            if len(rows) != 3:
+                raise ValueError(f"expected 3 rows, got {len(rows)}")
+            reference.receive_data(bytes(automatic))
+        except Exception as error:
+            ok, why = False, f"budget probe failed: {error!r}"
+    record(
+        "h2",
+        "one-frame dispatch budget preserves hyperframe wire order and hyper-h2 output",
+        ok,
+        why,
+    )
+
 
 def section_h2_dispatch(tmp: Path):
     print("== stateful h2 frame dispatch vs hyper-h2 ==")

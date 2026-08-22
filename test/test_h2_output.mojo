@@ -220,6 +220,78 @@ def test_incremental_connection_error_is_terminal() raises:
     assert_true(raised, "connection error must reject later input")
 
 
+def test_incremental_dispatch_budget_resumes_in_order() raises:
+    var conn = make_client()
+    var wire = from_hex(
+        "000000040000000000"
+        "0000080600000000003132333435363738"
+        "0000080600000000004142434445464748"
+    )
+    assert_equal(conn.feed_input(Span(wire), 1), 1)
+    assert_equal(conn.pending_input_frame_count(), 2)
+    assert_true(conn.peer_settings_received)
+    var output = conn.take_pending_output()
+    assert_equal(to_hex(Span(output)), "000000040100000000")
+
+    var empty = List[Byte]()
+    assert_equal(conn.feed_input(Span(empty), 1), 1)
+    assert_equal(conn.pending_input_frame_count(), 1)
+    output = conn.take_pending_output()
+    assert_equal(
+        to_hex(Span(output)),
+        "0000080601000000003132333435363738",
+    )
+    assert_equal(conn.feed_input(Span(empty), 1), 1)
+    assert_equal(conn.pending_input_frame_count(), 0)
+    output = conn.take_pending_output()
+    assert_equal(
+        to_hex(Span(output)),
+        "0000080601000000004142434445464748",
+    )
+
+    var unlimited = make_client()
+    assert_equal(unlimited.feed_input(Span(wire)), 3)
+    assert_equal(unlimited.pending_input_frame_count(), 0)
+
+    var paused = make_client()
+    assert_equal(paused.feed_input(Span(wire), 0), 0)
+    assert_equal(paused.pending_input_frame_count(), 3)
+    var more = from_hex("000000040000000000")
+    var pending_raised = False
+    try:
+        _ = paused.feed_input(Span(more), 1)
+    except error:
+        pending_raised = True
+        assert_true("resume pending frames" in String(error), String(error))
+    assert_true(pending_raised, "pending frames reject new input")
+    assert_equal(paused.pending_input_frame_count(), 3)
+    assert_equal(paused.feed_input(Span(empty), 1), 1)
+    assert_equal(paused.pending_input_frame_count(), 2)
+
+    var invalid = make_client()
+    var raised = False
+    try:
+        _ = invalid.feed_input(Span(empty), -2)
+    except error:
+        raised = True
+        assert_true("dispatch budget" in String(error), String(error))
+    assert_true(raised, "negative budgets below the sentinel are rejected")
+
+    var malformed = make_client()
+    var bad = from_hex(
+        "000000040000000000"
+        "0000080600000000013132333435363738"
+    )
+    assert_equal(malformed.feed_input(Span(bad), 1), 1)
+    assert_equal(malformed.pending_input_frame_count(), 1)
+    raised = False
+    try:
+        _ = malformed.feed_input(Span(empty), 1)
+    except:
+        raised = True
+    assert_true(raised, "budgeted dispatch preserves malformed-frame errors")
+
+
 def test_automatic_responses_queue_without_writes() raises:
     var conn = make_client()
     conn.stream.reject_writes = True
@@ -450,6 +522,7 @@ def main() raises:
     test_client_startup_is_queued_without_writes()
     test_enable_push_obeys_endpoint_roles()
     test_incremental_connection_error_is_terminal()
+    test_incremental_dispatch_budget_resumes_in_order()
     test_automatic_responses_queue_without_writes()
     test_data_queues_connection_window_update()
     test_errors_queue_goaway_and_rst_stream()

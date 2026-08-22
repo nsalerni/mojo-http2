@@ -862,11 +862,13 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         """
         return len(self._input_frames)
 
-    def _process_pending_input(mut self) raises -> Int:
+    def _process_pending_input(mut self, dispatch_budget: Int = -1) raises -> Int:
         """Dispatches decoded frames while worst-case responses can fit."""
         var processed = 0
         var response_bound = 2 * (FRAME_HEADER_LEN + 4)
         while len(self._input_frames) > 0:
+            if dispatch_budget >= 0 and processed >= dispatch_budget:
+                break
             if (
                 self.max_pending_output_size < len(self._pending_output)
                 or response_bound
@@ -882,7 +884,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             processed += 1
         return processed
 
-    def feed_input(mut self, data: Span[Byte, _]) raises -> Int:
+    def feed_input(
+        mut self, data: Span[Byte, _], dispatch_budget: Int = -1
+    ) raises -> Int:
         """Consumes available wire bytes without transport I/O.
 
         Server input begins with the RFC 9113 §3.4 client preface. The
@@ -892,12 +896,19 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
         If the output queue lacks room for a frame's worst-case automatic
         responses, that decoded frame remains pending. After draining output,
-        call this method again, with the next bytes or an empty span, to
-        resume dispatch.
+        resume dispatch with an empty span. New wire bytes are accepted only
+        after `pending_input_frame_count()` returns zero.
+
+        A dispatch budget can also leave decoded frames pending. While
+        `pending_input_frame_count()` is nonzero, callers must resume with an
+        empty span before supplying more wire bytes.
 
         Args:
             data: Newly received contiguous bytes. Bytes are consumed before
                 this method returns unless it raises before validating them.
+            dispatch_budget: Maximum frames to dispatch during this call, or
+                -1 for no per-call limit. Decoded frames beyond the limit stay
+                pending and resume when this method is called again.
 
         Returns:
             The number of complete frames dispatched by this call. A zero
@@ -905,15 +916,18 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
         Raises:
             On a malformed client preface, oversized frame, or protocol
-            error. Connection errors queue GOAWAY without writing it.
+            error. Values below -1 are invalid. Connection errors queue GOAWAY
+            without writing it.
         """
+        if dispatch_budget < -1:
+            raise Error("h2: dispatch budget must be -1 or non-negative")
         if self._input_failed:
             raise Error("h2: incremental input is failed")
+        if len(self._input_frames) > 0 and len(data) > 0:
+            raise Error("h2: resume pending frames before feeding more input")
 
-        var processed = self._process_pending_input()
+        var processed = self._process_pending_input(dispatch_budget)
         if len(self._input_frames) > 0:
-            if len(data) > 0:
-                raise Error("h2: drain output before feeding more input")
             return processed
         if len(data) == 0:
             return processed
@@ -956,7 +970,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         # Store in reverse wire order so pop() dispatches the first frame.
         while len(decoded) > 0:
             self._input_frames.append(decoded.pop())
-        return processed + self._process_pending_input()
+        var remaining_budget = dispatch_budget
+        if remaining_budget >= 0:
+            remaining_budget -= processed
+        return processed + self._process_pending_input(remaining_budget)
 
     def process_next_frame(mut self) raises:
         """Reads and processes the next complete protocol action.

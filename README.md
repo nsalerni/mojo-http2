@@ -42,7 +42,9 @@ Client startup bytes enter the outbound queue immediately. A server validates
 the 24-byte client preface through `feed_input`, then queues its SETTINGS.
 `feed_input` accepts prefaces and frames split at any byte boundary, dispatches
 complete frames in wire order, and leaves automatic responses for the caller
-to drain. `process_next_frame` preserves the blocking compatibility path.
+to drain. Its optional frame budget bounds work per call; callers resume
+pending frames with empty input before supplying more bytes. `process_next_frame`
+preserves the blocking compatibility path.
 
 `IncrementalFrameDecoder` remains available for callers that need framing
 without connection dispatch. It retains only an incomplete header or payload
