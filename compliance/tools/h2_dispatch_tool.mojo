@@ -74,6 +74,7 @@ def main() raises:
     infile.close()
 
     var conn = Http2Connection(SinkStream(), is_client=True)
+    _ = conn.take_pending_output()
     var active = False
     var failed = False
     var failure = String()
@@ -86,6 +87,7 @@ def main() raises:
             if active:
                 raise Error("CASE inside CASE")
             conn = Http2Connection(SinkStream(), is_client=True)
+            _ = conn.take_pending_output()
             active = True
             failed = False
             failure = String()

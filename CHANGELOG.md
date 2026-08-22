@@ -9,6 +9,8 @@
 - Added a bounded outbound frame queue and non-writing `queue_*` APIs, with
   automatic protocol responses and flow-control progress verified against
   hyper-h2.
+- Made connection startup nonblocking and added `feed_input` for arbitrarily
+  fragmented prefaces and frames, verified against hyper-h2 at every split.
 
 ## 0.2.1 - 2026-08-20
 

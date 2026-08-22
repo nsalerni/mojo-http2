@@ -62,11 +62,11 @@ code { font-family: var(--mono); font-size: 0.92em; }
 <header>
 <p class="eyebrow">mojo-http2 &middot; differential compliance run</p>
 <h1>HPACK and HTTP/2 checked against the tools that reject violations</h1>
-<div class="verdict"><span class="score">25/25</span><span>checks passed</span><span class="when">2026-08-21 06:51 UTC</span></div>
+<div class="verdict"><span class="score">27/27</span><span>checks passed</span><span class="when">2026-08-22 03:18 UTC</span></div>
 <p class="thesis">No self-grading: header compression is judged by python-hpack in both directions, frames byte-for-byte by hyperframe, live connections by strict hyper-h2 peers, TLS by CPython ssl, and the full RFC 9113/7541 surface by h2spec in cleartext and TLS modes.</p>
 <ul class="scorecard">
 <li>hpack <span class="n">5/5</span></li>
-<li>h2 <span class="n">16/16</span></li>
+<li>h2 <span class="n">18/18</span></li>
 <li>h2_tls <span class="n">4/4</span></li>
 </ul></header>
 <section>
@@ -92,6 +92,8 @@ code { font-family: var(--mono); font-size: 0.92em; }
 <tr><td>coalesced input preserves 7 hyperframe frames</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>seeded fragmentation of a 16 KiB hyperframe DATA frame</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>incomplete hyperframe suffix is retained without early output</td><td class="result"><span class="pass">PASS</span></td></tr>
+<tr><td>connection startup accepts hyper-h2 bytes at every split point (76 plans)</td><td class="result"><span class="pass">PASS</span></td></tr>
+<tr><td>one-byte startup feeds preserve all 75 hyper-h2 bytes</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>process_frame reassembles hyper-h2 header blocks across one or more CONTINUATION frames</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>process_frame preserves HPACK dynamic state across streams</td><td class="result"><span class="pass">PASS</span></td></tr>
 <tr><td>process_frame queues SETTINGS and PING acknowledgements matching hyper-h2</td><td class="result"><span class="pass">PASS</span></td></tr>

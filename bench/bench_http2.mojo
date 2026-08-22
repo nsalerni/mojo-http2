@@ -207,6 +207,7 @@ def main() raises:
     # Unknown types are the smallest valid no-op in RFC 9113. This isolates
     # public process_frame routing and validation from socket and HPACK work.
     var dispatch_conn = Http2Connection(SinkStream(), is_client=True)
+    _ = dispatch_conn.take_pending_output()
     var dispatch_count = 0
 
     def dispatch_unknown() raises {mut dispatch_conn, mut dispatch_count}:
@@ -232,6 +233,7 @@ def main() raises:
 
     # --- outbound frame queue ---
     var queue_conn = Http2Connection(SinkStream(), is_client=True)
+    _ = queue_conn.take_pending_output()
     var queued_bytes = 0
 
     def queue_ping() raises {mut queue_conn, mut queued_bytes}:

@@ -25,6 +25,17 @@ Verified by h2spec in TLS mode and by hyper-h2 over CPython's `ssl` module
 in both roles. The same suite checks certificate verification, ALPN
 selection, and rejection when `h2` is not negotiated.
 
+## 3. Readiness-driven transport boundary (shipped)
+
+Construction queues client startup bytes without reading or writing the
+transport. `feed_input` accepts the server-side client preface and subsequent
+frames at arbitrary byte boundaries, while `take_pending_output` exposes every
+protocol response. The blocking connection pump remains available as a
+compatibility adapter over the same state machine.
+
+Verified against hyper-h2 at every preface and SETTINGS split point, including
+one-byte feeds, with hidden transport reads and writes rejected by the probe.
+
 ## Deliberate non-goals
 
 These stay out on purpose, not for lack of time:

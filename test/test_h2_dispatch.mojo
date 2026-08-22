@@ -41,6 +41,7 @@ struct SinkStream(IOStream):
 
 def make_client() raises -> Http2Connection[SinkStream]:
     var conn = Http2Connection(SinkStream(), is_client=True)
+    _ = conn.take_pending_output()
     assert_equal(conn.open_stream(), 1)
     return conn^
 

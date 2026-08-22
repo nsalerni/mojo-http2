@@ -69,6 +69,7 @@ from .frame import (
     FRAME_WINDOW_UPDATE,
     Frame,
     FrameHeader,
+    IncrementalFrameDecoder,
     Settings,
     get_u32_be,
     put_u32_be,
@@ -149,10 +150,10 @@ struct StreamState(Movable):
 struct Http2Connection[S: IOStream = TCPStream](Movable):
     """HTTP/2 connection state machine over a reliable byte stream.
 
-    Usable as either endpoint: construct with `is_client=True` to send the
-    connection preface, or `is_client=False` to expect it. Construction
-    also sends the initial SETTINGS frame; the peer's SETTINGS is handled
-    by the normal frame loop.
+    Usable as either endpoint: construct with `is_client=True` to queue the
+    connection preface, or `is_client=False` to expect it. Construction does
+    not read from or write to the transport. The initial SETTINGS and all
+    automatic responses enter the bounded outbound queue.
 
     There is no background thread or event loop. Callers either feed complete
     frames with `process_frame` and take the resulting queued output, or pump
@@ -233,14 +234,22 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     """Whether the pending HEADERS priority depends on its own stream."""
     var _pending_header_continuations: Int
     """CONTINUATION frames received for the pending header block."""
+    var _input_decoder: IncrementalFrameDecoder
+    """Frame decoder used by the readiness-driven byte-feed path."""
+    var _input_frames: List[Frame]
+    """Decoded frames awaiting enough outbound response capacity."""
+    var _preface_received: Int
+    """Validated bytes of the client connection preface."""
+    var _input_failed: Bool
+    """True after a terminal preface or frame-decoding error."""
 
     def __init__(out self, var stream: Self.S, *, is_client: Bool) raises:
-        """Performs the connection preface exchange and sends our SETTINGS.
+        """Initializes the connection without transport reads or writes.
 
-        As a client, writes the [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
-        §3.4 preface followed by SETTINGS. As a server, reads and verifies
-        the client preface, then sends SETTINGS. Neither side waits for the
-        peer's SETTINGS here; `process_next_frame` handles (and ACKs) it.
+        As a client, queues the [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
+        §3.4 preface followed by SETTINGS. A server queues SETTINGS after
+        `feed_input` or `process_next_frame` validates the complete client
+        preface. Neither role waits for peer bytes during construction.
 
         Args:
             stream: The connected stream; ownership is taken and the
@@ -249,9 +258,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 server.
 
         Raises:
-            On transport errors, or (server role) when the client preface
-            is malformed — after responding with GOAWAY(PROTOCOL_ERROR)
-            per §3.4.
+            If the latency hint cannot be applied or startup output cannot
+            fit in the default queue.
         """
         self.stream = stream^
         self.is_client = is_client
@@ -285,32 +293,31 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self._pending_header_peer_initiated = False
         self._pending_header_self_dependency = False
         self._pending_header_continuations = 0
+        self._input_decoder = IncrementalFrameDecoder()
+        self._input_frames = List[Frame]()
+        self._preface_received = (
+            StaticString(CONNECTION_PREFACE).byte_length() if is_client else 0
+        )
+        self._input_failed = False
         self.stream.set_nodelay(True)
 
+        if is_client:
+            self._ensure_output_capacity(
+                StaticString(CONNECTION_PREFACE).byte_length()
+            )
+            self._pending_output.extend(
+                StaticString(CONNECTION_PREFACE).as_bytes()
+            )
+            self._queue_initial_settings()
+
+    def _queue_initial_settings(mut self) raises:
+        """Queues the local connection preface SETTINGS frame."""
         var our = List[Byte]()
         put_u16_be(our, SETTINGS_MAX_CONCURRENT_STREAMS)
         put_u32_be(our, UInt32(self.max_concurrent_streams))
         put_u16_be(our, SETTINGS_MAX_HEADER_LIST_SIZE)
         put_u32_be(our, UInt32(self.max_header_list_size))
-        if is_client:
-            self.stream.write_all(StaticString(CONNECTION_PREFACE).as_bytes())
-            self._write_frame(FRAME_SETTINGS, 0, 0, our.copy())
-        else:
-            var preface = self.stream.read_exact(
-                StaticString(CONNECTION_PREFACE).byte_length()
-            )
-            if String(from_utf8=preface) != String(
-                StaticString(CONNECTION_PREFACE)
-            ):
-                # §3.4: respond with GOAWAY(PROTOCOL_ERROR) and close.
-                try:
-                    self.send_goaway(ERR_PROTOCOL_ERROR)
-                except:
-                    pass
-                raise Error("h2: bad client connection preface")
-            self._write_frame(FRAME_SETTINGS, 0, 0, our.copy())
-        # Both sides: the peer's SETTINGS is processed by the normal frame
-        # loop (process_next_frame ACKs it).
+        self._queue_frame(FRAME_SETTINGS, 0, 0, our^)
 
     # --- low-level frame I/O ---
 
@@ -770,6 +777,124 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
     # --- receiving / dispatch ---
 
+    def input_preface_complete(self) -> Bool:
+        """Reports whether the client connection preface is complete.
+
+        Clients do not receive this marker, so this is true immediately for
+        a client-role connection. Servers become ready for frames only after
+        all 24 bytes from RFC 9113 §3.4 have been validated.
+
+        Returns:
+            True when frame bytes may follow the connection preface.
+        """
+        return self._preface_received == StaticString(
+            CONNECTION_PREFACE
+        ).byte_length()
+
+    def pending_input_frame_count(self) -> Int:
+        """Reports decoded frames waiting for outbound queue capacity.
+
+        Returns:
+            The number of complete frames retained for later dispatch.
+        """
+        return len(self._input_frames)
+
+    def _process_pending_input(mut self) raises -> Int:
+        """Dispatches decoded frames while worst-case responses can fit."""
+        var processed = 0
+        var response_bound = 2 * (FRAME_HEADER_LEN + 4)
+        while len(self._input_frames) > 0:
+            if (
+                self.max_pending_output_size < len(self._pending_output)
+                or response_bound
+                > self.max_pending_output_size - len(self._pending_output)
+            ):
+                break
+            var frame = self._input_frames.pop()
+            try:
+                self.process_frame(frame^)
+            except error:
+                self._input_failed = True
+                raise error
+            processed += 1
+        return processed
+
+    def feed_input(mut self, data: Span[Byte, _]) raises -> Int:
+        """Consumes available wire bytes without transport I/O.
+
+        Server input begins with the RFC 9113 §3.4 client preface. The
+        preface and subsequent frames may be split at any byte boundary.
+        Complete frames are dispatched in wire order, and automatic
+        responses are queued for `take_pending_output`.
+
+        If the output queue lacks room for a frame's worst-case automatic
+        responses, that decoded frame remains pending. After draining output,
+        call this method again, with the next bytes or an empty span, to
+        resume dispatch.
+
+        Args:
+            data: Newly received contiguous bytes. Bytes are consumed before
+                this method returns unless it raises before validating them.
+
+        Returns:
+            The number of complete frames dispatched by this call. A zero
+            result can mean that more bytes or more output capacity is needed.
+
+        Raises:
+            On a malformed client preface, oversized frame, or protocol
+            error. Connection errors queue GOAWAY without writing it.
+        """
+        if self._input_failed:
+            raise Error("h2: incremental input is failed")
+
+        var processed = self._process_pending_input()
+        if len(self._input_frames) > 0:
+            if len(data) > 0:
+                raise Error("h2: drain output before feeding more input")
+            return processed
+        if len(data) == 0:
+            return processed
+
+        var offset = 0
+        var preface_len = StaticString(CONNECTION_PREFACE).byte_length()
+        if self._preface_received < preface_len:
+            var remaining = preface_len - self._preface_received
+            var required_output = (
+                FRAME_HEADER_LEN + 12
+                if len(data) >= remaining
+                else FRAME_HEADER_LEN + 8
+            )
+            # Reserve before consuming bytes so a retry can use the same span.
+            self._ensure_output_capacity(required_output)
+            var expected = StaticString(CONNECTION_PREFACE).as_bytes()
+            var take = min(remaining, len(data))
+            for i in range(take):
+                if data[i] != expected[self._preface_received]:
+                    self._input_failed = True
+                    self._conn_error(
+                        ERR_PROTOCOL_ERROR,
+                        String("bad client connection preface"),
+                    )
+                self._preface_received += 1
+            offset = take
+            if self._preface_received < preface_len:
+                return processed
+            self._queue_initial_settings()
+
+        var decoded = List[Frame]()
+        try:
+            decoded = self._input_decoder.feed(data[offset : len(data)])
+        except:
+            self._input_failed = True
+            self._conn_error(
+                ERR_FRAME_SIZE_ERROR,
+                String("frame exceeds max frame size"),
+            )
+        # Store in reverse wire order so pop() dispatches the first frame.
+        while len(decoded) > 0:
+            self._input_frames.append(decoded.pop())
+        return processed + self._process_pending_input()
+
     def process_next_frame(mut self) raises:
         """Reads and processes the next complete protocol action.
 
@@ -791,6 +916,12 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.flush_output()
         self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
         try:
+            if not self.input_preface_complete():
+                var preface = self.stream.read_exact(
+                    StaticString(CONNECTION_PREFACE).byte_length()
+                    - self._preface_received
+                )
+                _ = self.feed_input(Span(preface))
             var frame = self._read_frame()
             self.process_frame(frame^)
             while self._pending_header_stream != 0:
