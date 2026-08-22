@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-08-22
+
 - Added stateful `process_frame` dispatch for readiness-driven callers while
   preserving the blocking `process_next_frame` API.
 - Bounded compressed HEADERS plus CONTINUATION storage and fragment count, and
@@ -11,6 +13,8 @@
   hyper-h2.
 - Made connection startup nonblocking and added `feed_input` for arbitrarily
   fragmented prefaces and frames, verified against hyper-h2 at every split.
+- Corrected SETTINGS_ENABLE_PUSH behavior for client and server roles.
+- Added a live h2spec results badge and an incremental h2c loopback example.
 
 ## 0.2.1 - 2026-08-20
 
