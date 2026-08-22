@@ -15,7 +15,10 @@ from h2 import (
     Frame,
     FrameHeader,
     Http2Connection,
+    put_u16_be,
+    put_u32_be,
 )
+from h2.frame import SETTINGS_ENABLE_PUSH
 from hpack import HeaderField
 from net import IOStream
 from testutil import from_hex, to_hex
@@ -69,6 +72,13 @@ def make_frame(
         ),
         payload=payload^,
     )
+
+
+def push_setting(value: UInt32) -> Frame:
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_ENABLE_PUSH)
+    put_u32_be(payload, value)
+    return make_frame(FRAME_SETTINGS, 0, 0, payload^)
 
 
 def test_incremental_startup_and_every_split_point() raises:
@@ -132,8 +142,57 @@ def test_client_startup_is_queued_without_writes() raises:
         to_hex(Span(output)),
         (
             "505249202a20485454502f322e300d0a0d0a534d0d0a0d0a"
-            "00000c040000000000000300000100000600004000"
+            "000012040000000000000200000000000300000100000600004000"
         ),
+    )
+    assert_false(client.our_settings.enable_push, "client disables push")
+
+
+def test_enable_push_obeys_endpoint_roles() raises:
+    for value in [UInt32(0), UInt32(1), UInt32(2)]:
+        var client = make_client()
+        var raised = False
+        try:
+            client.process_frame(push_setting(value))
+        except error:
+            raised = True
+            assert_true("server sent ENABLE_PUSH" in String(error), String(error))
+        assert_true(raised, "client rejects server ENABLE_PUSH")
+        var output = client.take_pending_output()
+        assert_equal(
+            to_hex(Span(output)),
+            "0000080700000000000000000000000001",
+            "client sends GOAWAY(PROTOCOL_ERROR)",
+        )
+
+    for value in [UInt32(0), UInt32(1)]:
+        var server = Http2Connection(RejectingStream(), is_client=False)
+        server.process_frame(push_setting(value))
+        assert_equal(
+            server.peer_settings.enable_push,
+            value == 1,
+            "server applies a valid client setting",
+        )
+        var output = server.take_pending_output()
+        assert_equal(
+            to_hex(Span(output)),
+            "000000040100000000",
+            "server acknowledges a valid client setting",
+        )
+
+    var server = Http2Connection(RejectingStream(), is_client=False)
+    var raised = False
+    try:
+        server.process_frame(push_setting(2))
+    except error:
+        raised = True
+        assert_true("invalid ENABLE_PUSH" in String(error), String(error))
+    assert_true(raised, "server rejects ENABLE_PUSH above one")
+    var output = server.take_pending_output()
+    assert_equal(
+        to_hex(Span(output)),
+        "0000080700000000000000000000000001",
+        "server sends GOAWAY(PROTOCOL_ERROR)",
     )
 
 
@@ -389,6 +448,7 @@ def test_failed_flush_retains_output() raises:
 def main() raises:
     test_incremental_startup_and_every_split_point()
     test_client_startup_is_queued_without_writes()
+    test_enable_push_obeys_endpoint_roles()
     test_incremental_connection_error_is_terminal()
     test_automatic_responses_queue_without_writes()
     test_data_queues_connection_window_update()

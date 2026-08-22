@@ -302,6 +302,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.stream.set_nodelay(True)
 
         if is_client:
+            self.our_settings.enable_push = False
             self._ensure_output_capacity(
                 StaticString(CONNECTION_PREFACE).byte_length()
             )
@@ -313,6 +314,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     def _queue_initial_settings(mut self) raises:
         """Queues the local connection preface SETTINGS frame."""
         var our = List[Byte]()
+        if self.is_client:
+            # This implementation does not expose server push, so clients
+            # explicitly disable it in the initial SETTINGS frame.
+            put_u16_be(our, SETTINGS_ENABLE_PUSH)
+            put_u32_be(our, 0)
         put_u16_be(our, SETTINGS_MAX_CONCURRENT_STREAMS)
         put_u32_be(our, UInt32(self.max_concurrent_streams))
         put_u16_be(our, SETTINGS_MAX_HEADER_LIST_SIZE)
@@ -1078,6 +1084,13 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             if ident == SETTINGS_HEADER_TABLE_SIZE:
                 self.peer_settings.header_table_size = value
             elif ident == SETTINGS_ENABLE_PUSH:
+                # RFC 9113 section 6.5.2 reserves ENABLE_PUSH for clients.
+                # Any occurrence in a server's SETTINGS is a connection error.
+                if self.is_client:
+                    self._conn_error(
+                        ERR_PROTOCOL_ERROR,
+                        String("server sent ENABLE_PUSH"),
+                    )
                 if value > 1:
                     self._conn_error(
                         ERR_PROTOCOL_ERROR, String("invalid ENABLE_PUSH")
