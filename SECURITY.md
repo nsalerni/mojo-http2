@@ -1,17 +1,22 @@
-# Security Policy
+# Security policy
 
 ## Reporting a vulnerability
 
 Please report suspected vulnerabilities privately via
-[GitHub security advisories](https://github.com/nsalerni/grpc-mojo/security/advisories/new)
+[GitHub security advisories](https://github.com/nsalerni/mojo-http2/security/advisories/new)
 rather than public issues. You should receive a response within a week.
 
 ## Scope notes
 
-grpc-mojo currently supports plaintext HTTP/2 (h2c) only — it is not yet
-suitable for exposure to untrusted networks. The HTTP/2 layer implements the
-standard abuse mitigations (rapid-reset accounting, PING/SETTINGS flood
-limits, concurrency and header-size caps, flow-control backpressure), and
-the protobuf decoder enforces the reference nesting-depth limit, but the
-project has not had an external security review. See
-[docs/ROADMAP.md](docs/ROADMAP.md) for the TLS plan.
+mojo-http2 supports h2c, Unix sockets, and HTTP/2 over TLS. Use TLS with
+certificate verification when a connection needs confidentiality or peer
+authentication. h2c and Unix socket permissions do not provide certificate
+authentication.
+
+The HTTP/2 layer limits rapid resets, PING and SETTINGS floods, concurrent
+streams, header sizes, compressed header blocks, continuation frames, and
+queued control frames. Flow-control accounting applies backpressure. These
+limits do not replace request limits in the application that uses the package.
+
+mojo-http2 has not had an independent security review. See
+[ROADMAP.md](ROADMAP.md) for supported behavior and deliberate non-goals.

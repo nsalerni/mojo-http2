@@ -25,7 +25,8 @@ use the `queue_*` methods, and take serialized output. Blocking callers use
 which synchronously flush the same bounded FIFO. Callers release consumed,
 fully closed stream state with `retire_stream`.
 
-Conformance is verified with h2spec in cleartext and TLS modes.
+h2spec 2.6.0 checks its RFC 7540 and RFC 7541 suites in cleartext and TLS
+modes. Project tests cover selected behavior updated by RFC 9113.
 """
 
 from .connection import Http2Connection, StreamState
