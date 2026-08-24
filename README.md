@@ -91,7 +91,9 @@ pixi run example-h2c-loopback
 
 ## Verification
 
-- **h2spec: all 146 cases pass in cleartext and TLS modes** (RFC 9113 + RFC 7541 sections).
+- **h2spec 2.6.0: all 146 cases pass in cleartext and TLS modes.** h2spec
+  checks RFC 7540 and RFC 7541. Project tests against hyper-h2 and hyperframe
+  cover selected behavior updated by RFC 9113.
 - Byte-exact on every RFC 7541 Appendix C vector; the encoder reproduces
   the C.4 and C.6 example streams exactly.
 - Differential-tested against **python-hpack** in both directions

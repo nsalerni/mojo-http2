@@ -8,8 +8,8 @@ Python references:
   h2     vs  hyper-h2 + hyperframe (strict: raises ProtocolError on any
              protocol violation by our side)
 
-Plus h2spec (the standard RFC 9113/7541 conformance tool) when the binary
-is on PATH.
+Plus the h2spec 2.6.0 RFC 7540 and RFC 7541 suites when the binary is on
+PATH. Project tests cover selected behavior updated by RFC 9113.
 
 The `h2` package depends on mojo-net; the runner locates its sources via
 MOJO_DEPS_DIR, ./.deps/mojo-net/src, or the monorepo sibling
@@ -1469,7 +1469,7 @@ def section_h2_tls(tmp: Path):
 
 
 def section_h2spec(tmp: Path):
-    print("== h2spec (RFC 9113/7541 conformance tool) ==")
+    print("== h2spec 2.6.0 (RFC 7540 and RFC 7541 suites) ==")
     h2spec_bin = shutil.which("h2spec")
     if not h2spec_bin:
         record("h2", "h2spec conformance (tool not installed; brew install h2spec)",
@@ -1708,7 +1708,7 @@ def esc(t: str) -> str:
 
 HTML_EYEBROW = "mojo-http2 &middot; differential compliance run"
 HTML_H1 = "HPACK and HTTP/2 checked against the tools that reject violations"
-HTML_THESIS = ("No self-grading: header compression is judged by python-hpack in both directions, frames byte-for-byte by hyperframe, live connections by strict hyper-h2 peers, TLS by CPython ssl, and the full RFC 9113/7541 surface by h2spec in cleartext and TLS modes.")
+HTML_THESIS = ("No self-grading: header compression is judged by python-hpack in both directions, frames byte-for-byte by hyperframe, live connections by strict hyper-h2 peers, and TLS by CPython ssl. h2spec 2.6.0 runs its RFC 7540 and RFC 7541 suites in cleartext and TLS modes. Project tests cover selected behavior updated by RFC 9113.")
 HTML_GAPS = [
     ("Priority scheduling", "PRIORITY frames are validated and ignored (per RFC 9113 deprecation)."),
     ("hpack value encoding", "header values are UTF-8 Strings; arbitrary octets are out of scope for now (gRPC uses base64 -bin metadata)."),
@@ -1720,8 +1720,9 @@ HTML_SECTIONS = {
            "Frame codec cross-checked byte-for-byte against hyperframe in both "
            "directions, including split, coalesced, and seeded-fragment input. "
            "Live connections run against hyper-h2, which raises ProtocolError "
-           "on any protocol violation by the peer. h2spec runs its full RFC "
-           "9113/7541 suite against our server."),
+           "on any protocol violation by the peer. h2spec 2.6.0 runs its "
+           "RFC 7540 and RFC 7541 suites against our server. Project tests "
+           "cover selected behavior updated by RFC 9113."),
     "h2_tls": ("`h2` over TLS vs CPython ssl / hyper-h2 / h2spec",
                "Both HTTP/2 roles run through verified CPython TLS peers and strict hyper-h2 state machines. ALPN omission and mismatch are rejected. h2spec repeats its complete run over TLS."),
 }
