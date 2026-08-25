@@ -16,7 +16,7 @@ preview = ["pixi-build"]
 # resolved by tools/dep_src.py through $MOJO_DEPS_DIR, .deps/, or sibling
 # package checkouts.
 prepare-tls = "python3 tools/prepare_tls.py"
-test = { cmd = "python3 -B compliance/test_compliance_registry.py && python3 -B compliance/test_h2spec_badge.py && python3 tools/run_tests.py", depends-on = ["prepare-tls"] }
+test = { cmd = "python3 -B compliance/test_compliance_registry.py && python3 -B compliance/test_h2spec_badge.py && python3 -B compliance/test_deterministic_sequences.py && python3 tools/run_tests.py", depends-on = ["prepare-tls"] }
 compliance = { cmd = "python3 compliance/run_compliance.py", depends-on = ["prepare-tls"] }
 bench = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS bench/bench_http2.mojo"
 bench-smoke = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS bench/bench_http2.mojo --smoke"
