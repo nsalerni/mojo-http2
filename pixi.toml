@@ -23,6 +23,7 @@ h2-state-compatibility-smoke = "python3 -B compliance/run_h2_randomized.py --see
 bench = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS bench/bench_http2.mojo"
 bench-smoke = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS bench/bench_http2.mojo --smoke"
 example-h2c-loopback = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS examples/h2c_loopback.mojo"
+example-h2-tls-loopback = { cmd = "NET=$(python3 tools/dep_src.py mojo-net) && TLS=$(python3 tools/dep_src.py mojo-tls) && mojo run -I src -I $NET -I $TLS examples/h2_tls_loopback.mojo", depends-on = ["prepare-tls"] }
 gen-hpack = "python3 tools/gen_hpack_tables.py"
 package-test = "python3 packaging/test_installed_package.py"
 
