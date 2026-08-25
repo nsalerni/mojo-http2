@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Verified the source and installed package against mojo-net 0.2.2 and
+  mojo-tls 0.3.0, while keeping package compatibility with mojo-tls 0.2
+  releases.
+
 ## 0.2.4 - 2026-08-22
 
 - Added an optional per-call frame dispatch budget to `feed_input`, with
