@@ -84,9 +84,14 @@ incremental API without hidden transport I/O. It splits startup, request, and
 response bytes across small feeds so the queue and partial-input behavior is
 visible in one file.
 
+`examples/h2_tls_loopback.mojo` makes one request through `H2TLSContext` in
+both roles. It verifies the `h2` ALPN result, certificate trust, request and
+response bodies, and a clean GOAWAY.
+
 ```sh
 python3 tools/fetch_deps.py
 pixi run example-h2c-loopback
+pixi run example-h2-tls-loopback
 ```
 
 ## Verification

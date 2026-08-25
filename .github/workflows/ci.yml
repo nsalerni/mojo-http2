@@ -123,6 +123,9 @@ jobs:
       - name: Incremental h2c loopback example
         run: pixi run example-h2c-loopback
 
+      - name: HTTP/2 over TLS loopback example
+        run: pixi run example-h2-tls-loopback
+
       - name: Benchmarks (smoke)
         run: pixi run bench-smoke
 
