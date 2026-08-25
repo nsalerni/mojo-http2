@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.5 - 2026-08-25
+
 - Verified the source and installed package against mojo-net 0.2.2 and
   mojo-tls 0.3.0, while keeping package compatibility with mojo-tls 0.2
   releases.
