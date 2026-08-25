@@ -103,6 +103,9 @@ pixi run example-h2c-loopback
 - Stateful HPACK sequences keep one encoder and decoder alive across 250
   blocks on every pull request. A weekly job checks 10,000 blocks from seed
   7541 and saves the shortest reproducing prefix on a mismatch.
+- HTTP/2 connection-state sequences run 250 cases against hyper-h2 on every
+  pull request. A weekly job runs 10,000 cases from seed 9113 and saves a
+  reduced sequence that preserves the failure class.
 - Incremental frame decoding is checked against hyperframe bytes at every
   split point, one byte at a time, as coalesced input, and with seeded
   fragmentation of a 16 KiB DATA frame.
@@ -128,6 +131,7 @@ python3 tools/fetch_deps.py   # standalone checkout: fetch mojo-net and mojo-tls
 pixi run test                 # unit tests (hpack + h2)
 pixi run compliance           # differential + h2spec; rewrites COMPLIANCE.md
 python3 compliance/test_hpack_randomized.py --seed 7541 --case-count 250
+pixi run h2-state-compatibility --seed 9113 --case-count 250
 pixi run bench                # HPACK/frame coding benchmarks
 ```
 
