@@ -100,6 +100,9 @@ pixi run example-h2c-loopback
   (including mid-stream dynamic table size updates and multibyte UTF-8
   values), against **hyperframe** for byte-identical frame serialization,
   and against a strict **hyper-h2** peer live in both roles.
+- Stateful HPACK sequences keep one encoder and decoder alive across 250
+  blocks on every pull request. A weekly job checks 10,000 blocks from seed
+  7541 and saves the shortest reproducing prefix on a mismatch.
 - Incremental frame decoding is checked against hyperframe bytes at every
   split point, one byte at a time, as coalesced input, and with seeded
   fragmentation of a 16 KiB DATA frame.
@@ -124,6 +127,7 @@ on every push.
 python3 tools/fetch_deps.py   # standalone checkout: fetch mojo-net and mojo-tls
 pixi run test                 # unit tests (hpack + h2)
 pixi run compliance           # differential + h2spec; rewrites COMPLIANCE.md
+python3 compliance/test_hpack_randomized.py --seed 7541 --case-count 250
 pixi run bench                # HPACK/frame coding benchmarks
 ```
 
