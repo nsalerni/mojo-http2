@@ -6,7 +6,46 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  hpack-compatibility:
+    name: HPACK stateful compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: prefix-dev/setup-pixi@f00437f565399d418b0acc85936d12c1fb668347 # v0.10.1
+        with:
+          pixi-version: latest
+          cache: true
+          cache-write: false
+          post-cleanup: true
+
+      - name: Run HPACK stateful compatibility
+        run: |
+          seed=7541
+          cases=250
+          echo "HPACK stateful compatibility seed=$seed cases=$cases"
+          pixi run -x python3 -B compliance/test_hpack_randomized_failures.py
+          pixi run -x python3 compliance/test_hpack_randomized.py \
+            --seed "$seed" \
+            --case-count "$cases" \
+            --timeout 60 \
+            --probe-timeout 10 \
+            --workflow-limit-minutes 15 \
+            --mismatch-file hpack-compatibility-mismatch.json
+
+      - name: Upload the first HPACK mismatch
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hpack-compatibility-mismatch
+          path: hpack-compatibility-mismatch.json
+          if-no-files-found: ignore
+
   test:
     name: test (${{ matrix.os }})
     strategy:
