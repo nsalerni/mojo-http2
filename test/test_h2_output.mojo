@@ -4,6 +4,8 @@
 from std.testing import assert_equal, assert_false, assert_true
 
 from h2 import (
+    ERR_CANCEL,
+    ERR_NO_ERROR,
     ERR_PROTOCOL_ERROR,
     FLAG_ACK,
     FLAG_END_STREAM,
@@ -517,6 +519,51 @@ def test_failed_flush_retains_output() raises:
     assert_equal(conn.pending_output_len(), 17, "failed flush retains bytes")
 
 
+def test_local_goaway_blocks_open_stream() raises:
+    var conn = make_client()
+    assert_equal(conn.live_stream_count(), 0)
+    assert_equal(conn.open_stream(), 1)
+    assert_equal(conn.live_stream_count(), 1)
+    conn.queue_goaway(ERR_NO_ERROR)
+    assert_true(conn.sent_goaway)
+    var raised = False
+    var msg = String()
+    try:
+        _ = conn.open_stream()
+    except error:
+        raised = True
+        msg = String(error)
+    assert_true(raised, "open_stream after local GOAWAY must raise")
+    assert_true("GOAWAY" in msg, msg)
+    assert_equal(conn.live_stream_count(), 1)
+
+
+def test_begin_graceful_shutdown_and_live_count() raises:
+    var conn = make_client()
+    assert_equal(conn.open_stream(), 1)
+    conn.begin_graceful_shutdown()
+    assert_true(conn.sent_goaway)
+    var queued = conn.pending_output_len()
+    conn.begin_graceful_shutdown()
+    assert_equal(conn.pending_output_len(), queued, "second shutdown is a no-op")
+    var raised = False
+    try:
+        _ = conn.open_stream()
+    except:
+        raised = True
+    assert_true(raised, "graceful shutdown refuses new streams")
+
+    conn.streams[1].local_end = True
+    assert_equal(conn.live_stream_count(), 1, "half-closed still counts")
+    conn.streams[1].end_stream = True
+    assert_equal(conn.live_stream_count(), 0, "both ends closed")
+
+    conn = make_client()
+    assert_equal(conn.open_stream(), 1)
+    conn.streams[1].reset_code = ERR_CANCEL
+    assert_equal(conn.live_stream_count(), 0, "reset streams do not count")
+
+
 def main() raises:
     test_incremental_startup_and_every_split_point()
     test_client_startup_is_queued_without_writes()
@@ -533,4 +580,6 @@ def main() raises:
     test_queue_bound_is_atomic()
     test_dispatch_backpressure_is_retryable()
     test_failed_flush_retains_output()
+    test_local_goaway_blocks_open_stream()
+    test_begin_graceful_shutdown_and_live_count()
     print("test_h2_output: all tests passed")

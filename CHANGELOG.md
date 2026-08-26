@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refuses locally opened streams after this endpoint has sent GOAWAY.
+  `begin_graceful_shutdown` queues GOAWAY with NO_ERROR;
+  `live_stream_count` reports streams that are still open or half-closed.
 - Applies the peer's SETTINGS_HEADER_TABLE_SIZE to the HPACK encoder.
   If the size shrinks and then grows before the next header block, the
   encoder emits the minimum size and then the final size. An empty

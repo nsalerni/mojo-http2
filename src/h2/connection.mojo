@@ -39,6 +39,7 @@ from .frame import (
     ERR_COMPRESSION_ERROR,
     ERR_FLOW_CONTROL_ERROR,
     ERR_FRAME_SIZE_ERROR,
+    ERR_NO_ERROR,
     ERR_PROTOCOL_ERROR,
     ERR_STREAM_CLOSED,
     SETTINGS_ENABLE_PUSH,
@@ -501,6 +502,28 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             active += 1
         return active
 
+    def live_stream_count(self) raises -> Int:
+        """Counts streams that are still open or half-closed.
+
+        Reset streams and streams ended in both directions are omitted.
+        After `begin_graceful_shutdown`, callers can wait until this
+        returns zero before closing the transport.
+
+        Returns:
+            The number of streams that still occupy a connection slot.
+
+        Raises:
+            If a live stream id is missing from the stream table.
+        """
+        var live = 0
+        for id in self.stream_ids:
+            if Bool(self.streams[id].reset_code):
+                continue
+            if self.streams[id].local_end and self.streams[id].end_stream:
+                continue
+            live += 1
+        return live
+
     def open_stream(mut self) raises -> UInt32:
         """Allocates the next locally-initiated stream id.
 
@@ -509,11 +532,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             state record created.
 
         Raises:
-            If the peer has sent GOAWAY — no new streams may be opened on a
-            connection that is shutting down — or opening another stream
-            would exceed the peer's SETTINGS_MAX_CONCURRENT_STREAMS.
+            If this endpoint has sent GOAWAY or the peer has sent GOAWAY,
+            or opening another stream would exceed the peer's
+            SETTINGS_MAX_CONCURRENT_STREAMS.
         """
-        if self.goaway_code:
+        if self.goaway_code or self.sent_goaway:
             raise Error("h2: connection is shutting down (GOAWAY)")
         var peer_max = Int(self.peer_settings.max_concurrent_streams)
         if self._local_concurrent_streams() >= peer_max:
@@ -793,6 +816,20 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.flush_output()
         self.queue_goaway(code)
         self.flush_output()
+
+    def begin_graceful_shutdown(mut self) raises:
+        """Queues GOAWAY with NO_ERROR and refuses further local streams.
+
+        Existing streams remain usable. Readiness-driven callers take the
+        queued frame with `take_pending_output`; blocking callers flush
+        afterwards. A second call is a no-op once GOAWAY has been queued.
+
+        Raises:
+            If the frame would exceed the outbound queue bound.
+        """
+        if self.sent_goaway:
+            return
+        self.queue_goaway(ERR_NO_ERROR)
 
     # --- error signaling (RFC 9113 §5.4) ---
 
@@ -1754,6 +1791,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     def close(mut self):
         """Closes the underlying TCP stream without sending GOAWAY.
 
-        Call `send_goaway` first for a graceful shutdown.
+        Call `begin_graceful_shutdown` (or `send_goaway`) first for a
+        graceful shutdown, and wait until `live_stream_count` is zero.
         """
         self.stream.close()
