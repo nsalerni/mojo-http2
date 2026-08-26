@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.6 - 2026-08-26
+
 - `flush_output` writes with `write_some` and drops any prefix the
   transport accepted, so a failed flush can be retried without
   duplicating bytes already on the wire. Requires mojo-net `v0.2.3`.
