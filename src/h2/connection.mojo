@@ -245,6 +245,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     """Validated bytes of the client connection preface."""
     var _input_failed: Bool
     """True after a terminal preface or frame-decoding error."""
+    var _last_keepalive_ns: Optional[Int64]
+    """Caller-supplied timestamp of the last keepalive activity, if any."""
 
     def __init__(out self, var stream: Self.S, *, is_client: Bool) raises:
         """Initializes the connection without transport reads or writes.
@@ -303,6 +305,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             StaticString(CONNECTION_PREFACE).byte_length() if is_client else 0
         )
         self._input_failed = False
+        self._last_keepalive_ns = None
         self.stream.set_nodelay(True)
 
         if is_client:
@@ -903,6 +906,53 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.flush_output()
         self.queue_ping(data)
         self.flush_output()
+
+    def touch_keepalive(mut self, now_ns: Int64):
+        """Records that the connection was used at `now_ns`.
+
+        Call this after sending or receiving useful frames so idle
+        keepalive PINGs are postponed. There is no internal clock;
+        the caller supplies the timestamp.
+
+        Args:
+            now_ns: Current time in nanoseconds from the caller's clock.
+        """
+        self._last_keepalive_ns = now_ns
+
+    def maybe_keepalive_ping(
+        mut self, now_ns: Int64, interval_ns: Int64
+    ) raises -> Bool:
+        """Queues a PING if the connection has been idle for `interval_ns`.
+
+        The first call with no prior timestamp starts the idle clock
+        without sending. Subsequent calls queue one PING when the idle
+        interval has elapsed and then restart the clock. Does not ping
+        after GOAWAY has been sent or received. The PING payload is the
+        supplied timestamp, truncated to 64 bits.
+
+        Args:
+            now_ns: Current time in nanoseconds from the caller's clock.
+            interval_ns: Idle duration before a keepalive PING.
+
+        Returns:
+            True when a PING frame was queued.
+
+        Raises:
+            If `interval_ns` is not positive, or if the PING would exceed
+            the outbound queue bound.
+        """
+        if interval_ns <= 0:
+            raise Error("h2: keepalive interval must be positive")
+        if self.sent_goaway or Bool(self.goaway_code):
+            return False
+        if not self._last_keepalive_ns:
+            self._last_keepalive_ns = now_ns
+            return False
+        if now_ns - self._last_keepalive_ns.value() < interval_ns:
+            return False
+        self.queue_ping(UInt64(now_ns))
+        self._last_keepalive_ns = now_ns
+        return True
 
     # --- receiving / dispatch ---
 
