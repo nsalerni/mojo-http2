@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Applies the peer's SETTINGS_HEADER_TABLE_SIZE to the HPACK encoder.
+  If the size shrinks and then grows before the next header block, the
+  encoder emits the minimum size and then the final size. An empty
+  HEADERS block still flushes that update.
+- Refuses locally opened streams that would exceed the peer's
+  SETTINGS_MAX_CONCURRENT_STREAMS. Half-closed streams still occupy a
+  slot; a locally sent RST_STREAM frees it.
 - Shortened the README and added contributor, issue, and pull-request
   templates.
 - Aligned the weekly HTTP/2 state job timeout with the runner's allowed range.

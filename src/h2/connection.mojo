@@ -483,6 +483,24 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.stream_ids = remaining^
         return True
 
+    def _local_concurrent_streams(self) raises -> Int:
+        """Counts locally-initiated streams that still occupy a slot.
+
+        Open and half-closed streams both count ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
+        §5.1.2). A stream is released only after both sides end, or after
+        RST_STREAM.
+        """
+        var active = 0
+        for id in self.stream_ids:
+            if (id % 2 == 1) != self.is_client:
+                continue
+            if self.streams[id].local_end and self.streams[id].end_stream:
+                continue
+            if Bool(self.streams[id].reset_code):
+                continue
+            active += 1
+        return active
+
     def open_stream(mut self) raises -> UInt32:
         """Allocates the next locally-initiated stream id.
 
@@ -492,10 +510,14 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
         Raises:
             If the peer has sent GOAWAY — no new streams may be opened on a
-            connection that is shutting down.
+            connection that is shutting down — or opening another stream
+            would exceed the peer's SETTINGS_MAX_CONCURRENT_STREAMS.
         """
         if self.goaway_code:
             raise Error("h2: connection is shutting down (GOAWAY)")
+        var peer_max = Int(self.peer_settings.max_concurrent_streams)
+        if self._local_concurrent_streams() >= peer_max:
+            raise Error("h2: peer MAX_CONCURRENT_STREAMS exceeded")
         var id = self.next_stream_id
         self.next_stream_id += 2
         self._ensure_stream(id)
@@ -527,7 +549,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         # Preflight a conservative literal representation before mutating the
         # stateful HPACK encoder. Huffman output is never longer than raw input
         # in this encoder; the per-field allowance covers integer prefixes.
-        var upper_bound = 0
+        # Two dynamic table size updates (RFC 7541 §4.2) need at most 12 bytes.
+        var upper_bound = 12
         for f in fields:
             upper_bound += f.name.byte_length() + f.value.byte_length() + 32
         var max_len = Int(self.peer_settings.max_frame_size)
@@ -537,8 +560,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         )
 
         var block = List[Byte]()
-        for f in fields:
-            self.hpack_enc.encode_field(f, block)
+        self.hpack_enc.encode(fields, block)
         var frame_count = max(1, (len(block) + max_len - 1) // max_len)
         self._ensure_output_capacity(
             len(block) + frame_count * FRAME_HEADER_LEN
@@ -720,6 +742,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     def send_rst_stream(mut self, stream_id: UInt32, code: UInt32) raises:
         """Queues and synchronously flushes RST_STREAM.
 
+        Marks the stream reset locally after the RST_STREAM frame is
+        queued and flushed, so it no longer occupies a
+        SETTINGS_MAX_CONCURRENT_STREAMS slot.
+
         Args:
             stream_id: The stream to reset.
             code: One of the ERR_* error codes.
@@ -730,6 +756,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.flush_output()
         self.queue_rst_stream(stream_id, code)
         self.flush_output()
+        if stream_id in self.streams:
+            self.streams[stream_id].local_reset = True
+            self.streams[stream_id].reset_code = code
 
     def queue_goaway(mut self, code: UInt32) raises:
         """Queues GOAWAY without performing transport I/O.
@@ -1161,6 +1190,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             var value = get_u32_be(payload, off + 2)
             if ident == SETTINGS_HEADER_TABLE_SIZE:
                 self.peer_settings.header_table_size = value
+                self.hpack_enc.set_max_size(Int(value))
             elif ident == SETTINGS_ENABLE_PUSH:
                 # RFC 9113 section 6.5.2 reserves ENABLE_PUSH for clients.
                 # Any occurrence in a server's SETTINGS is a connection error.

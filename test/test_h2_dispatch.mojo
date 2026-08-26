@@ -4,14 +4,20 @@
 from std.testing import assert_equal, assert_false, assert_true
 
 from h2 import (
+    ERR_CANCEL,
     FLAG_END_HEADERS,
     FLAG_END_STREAM,
     FRAME_CONTINUATION,
     FRAME_HEADERS,
+    FRAME_SETTINGS,
     Frame,
     FrameHeader,
     Http2Connection,
+    put_u16_be,
+    put_u32_be,
 )
+from h2.frame import SETTINGS_HEADER_TABLE_SIZE, SETTINGS_MAX_CONCURRENT_STREAMS
+from hpack import HeaderField
 from net import IOStream
 from testutil import from_hex
 
@@ -261,6 +267,73 @@ def test_process_frame_validates_payload_length_and_limit() raises:
     assert_true(raised, "configured frame limit applies to direct dispatch")
 
 
+def test_settings_header_table_size_updates_encoder() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_HEADER_TABLE_SIZE)
+    put_u32_be(payload, 256)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    assert_equal(Int(conn.peer_settings.header_table_size), 256)
+    assert_equal(conn.hpack_enc.table.max_size, 256)
+    assert_equal(conn.hpack_enc.pending_table_size, 256)
+
+
+def test_empty_headers_flush_table_size_update() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_HEADER_TABLE_SIZE)
+    put_u32_be(payload, 256)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    var empty = List[HeaderField]()
+    conn.queue_headers(1, Span(empty), end_stream=False)
+    assert_equal(conn.hpack_enc.pending_table_size, -1)
+
+
+def test_open_stream_honors_peer_max_concurrent() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_MAX_CONCURRENT_STREAMS)
+    put_u32_be(payload, 1)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    var raised = False
+    var msg = String()
+    try:
+        _ = conn.open_stream()
+    except error:
+        raised = True
+        msg = String(error)
+    assert_true(raised, "second stream must be refused")
+    assert_true("MAX_CONCURRENT_STREAMS" in msg, msg)
+
+
+def test_rst_frees_concurrent_stream_slot() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_MAX_CONCURRENT_STREAMS)
+    put_u32_be(payload, 1)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    conn.send_rst_stream(1, ERR_CANCEL)
+    assert_equal(conn.open_stream(), 3)
+
+
+def test_half_closed_local_still_counts() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_MAX_CONCURRENT_STREAMS)
+    put_u32_be(payload, 1)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    conn.streams[1].local_end = True
+    var raised = False
+    var msg = String()
+    try:
+        _ = conn.open_stream()
+    except error:
+        raised = True
+        msg = String(error)
+    assert_true(raised, "half-closed local stream still occupies a slot")
+    assert_true("MAX_CONCURRENT_STREAMS" in msg, msg)
+
+
 def test_process_frame_ignores_unknown_type() raises:
     var conn = make_client()
     conn.process_frame(make_frame(0xFE, 0, 0, List[Byte]()))
@@ -277,5 +350,10 @@ def main() raises:
     test_process_frame_bounds_fragmented_header_storage()
     test_process_frame_bounds_continuation_count()
     test_process_frame_validates_payload_length_and_limit()
+    test_settings_header_table_size_updates_encoder()
+    test_empty_headers_flush_table_size_update()
+    test_open_stream_honors_peer_max_concurrent()
+    test_rst_frees_concurrent_stream_slot()
+    test_half_closed_local_still_counts()
     test_process_frame_ignores_unknown_type()
     print("test_h2_dispatch: all tests passed")
