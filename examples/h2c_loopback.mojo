@@ -19,6 +19,10 @@ struct LoopbackStream(IOStream):
         _ = data
         raise Error("loopback example does not perform blocking writes")
 
+    def write_some(self, data: Span[Byte, _]) raises -> Int:
+        self.write_all(data)
+        return len(data)
+
     def set_read_timeout(self, nanos: Int64) raises:
         _ = nanos
 
