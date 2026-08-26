@@ -58,12 +58,15 @@ struct RejectingStream(IOStream):
 
 
 struct PartialThenFailStream(IOStream):
-    """Accepts a fixed prefix on the first write, then fails."""
+    """Accepts 5 bytes of a full PING, then fails on the remainder.
 
-    var _accepted: Int
+    `IOStream.write_some` takes an immutable `self`, so the failure is
+    keyed off the offered span: a 17-byte PING is accepted in part, and
+    the 12-byte retry raises.
+    """
 
     def __init__(out self):
-        self._accepted = 0
+        pass
 
     def read_exact(self, n: Int) raises -> List[Byte]:
         _ = n
@@ -74,11 +77,9 @@ struct PartialThenFailStream(IOStream):
         raise Error("PartialThenFailStream does not support write_all")
 
     def write_some(self, data: Span[Byte, _]) raises -> Int:
-        if self._accepted > 0:
+        if len(data) < 17:
             raise Error("flush failed after partial write")
-        var n = min(5, len(data))
-        self._accepted = n
-        return n
+        return min(5, len(data))
 
     def set_read_timeout(self, nanos: Int64) raises:
         _ = nanos
