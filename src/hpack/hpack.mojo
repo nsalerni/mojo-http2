@@ -375,6 +375,8 @@ struct Encoder(Movable):
 
     var table: DynamicTable
     """Dynamic table mirroring the insertions the peer's decoder makes."""
+    var pending_table_size: Int
+    """Size update to emit at the start of the next header block, or -1."""
 
     def __init__(out self, max_table_size: Int = 4096):
         """Creates an encoder with an empty dynamic table.
@@ -384,6 +386,25 @@ struct Encoder(Movable):
                 exceed the SETTINGS_HEADER_TABLE_SIZE the peer advertised.
         """
         self.table = DynamicTable(max_table_size)
+        self.pending_table_size = -1
+
+    def set_max_size(mut self, max_size: Int):
+        """Lowers or raises the encoder table to the peer's decoder ceiling.
+
+        Evicts entries that no longer fit and emits a dynamic table size
+        update at the start of the next header block
+        ([RFC 7541](https://www.rfc-editor.org/rfc/rfc7541) §6.3).
+
+        Args:
+            max_size: The peer's SETTINGS_HEADER_TABLE_SIZE, in bytes.
+        """
+        self.table.set_max_size(max_size)
+        self.pending_table_size = max_size
+
+    def _flush_table_size_update(mut self, mut out_buf: List[Byte]):
+        if self.pending_table_size >= 0:
+            encode_integer(self.pending_table_size, 5, 0x20, out_buf)
+            self.pending_table_size = -1
 
     def _find(self, field: HeaderField) -> Tuple[Int, Int]:
         """Returns (full_match_index, name_match_index), 0 = none, 1-based."""
@@ -440,6 +461,7 @@ struct Encoder(Movable):
             out_buf: Buffer the encoded representation is appended to.
             sensitive: True to force the never-indexed representation.
         """
+        self._flush_table_size_update(out_buf)
         if sensitive:
             # Never Indexed (§6.2.3): protects e.g. authorization values
             # from CRIME-style attacks; forwards must preserve this.
@@ -478,5 +500,6 @@ struct Encoder(Movable):
             fields: The header fields to encode, in wire order.
             out_buf: Buffer the header block is appended to.
         """
+        self._flush_table_size_update(out_buf)
         for f in fields:
             self.encode_field(f, out_buf)

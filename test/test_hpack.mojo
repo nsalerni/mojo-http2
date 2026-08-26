@@ -294,6 +294,17 @@ def test_invalid_inputs() raises:
     assert_true(raised, "truncated literal must raise")
 
 
+def test_encoder_table_size_update() raises:
+    var e = Encoder()
+    e.set_max_size(30)
+    assert_equal(e.table.max_size, 30)
+    assert_equal(e.pending_table_size, 30)
+    var out = List[Byte]()
+    e.encode_field(hf("x", "y"), out)
+    assert_equal(e.pending_table_size, -1)
+    assert_equal(out[0], UInt8(0x20 | 30))
+
+
 def main() raises:
     test_integer_coding()
     test_c2_literals()
@@ -304,4 +315,5 @@ def main() raises:
     test_c6_responses_huffman()
     test_roundtrip_binary_values()
     test_invalid_inputs()
+    test_encoder_table_size_update()
     print("test_hpack: all tests passed")

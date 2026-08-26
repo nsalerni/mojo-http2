@@ -483,6 +483,19 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.stream_ids = remaining^
         return True
 
+    def _local_concurrent_streams(self) -> Int:
+        """Counts locally-initiated streams that still occupy a slot."""
+        var active = 0
+        for id in self.stream_ids:
+            if (id % 2 == 1) != self.is_client:
+                continue
+            if self.streams[id].local_end:
+                continue
+            if Bool(self.streams[id].reset_code):
+                continue
+            active += 1
+        return active
+
     def open_stream(mut self) raises -> UInt32:
         """Allocates the next locally-initiated stream id.
 
@@ -492,10 +505,14 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
         Raises:
             If the peer has sent GOAWAY — no new streams may be opened on a
-            connection that is shutting down.
+            connection that is shutting down — or opening another stream
+            would exceed the peer's SETTINGS_MAX_CONCURRENT_STREAMS.
         """
         if self.goaway_code:
             raise Error("h2: connection is shutting down (GOAWAY)")
+        var peer_max = Int(self.peer_settings.max_concurrent_streams)
+        if self._local_concurrent_streams() >= peer_max:
+            raise Error("h2: peer MAX_CONCURRENT_STREAMS exceeded")
         var id = self.next_stream_id
         self.next_stream_id += 2
         self._ensure_stream(id)
@@ -1161,6 +1178,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             var value = get_u32_be(payload, off + 2)
             if ident == SETTINGS_HEADER_TABLE_SIZE:
                 self.peer_settings.header_table_size = value
+                self.hpack_enc.set_max_size(Int(value))
             elif ident == SETTINGS_ENABLE_PUSH:
                 # RFC 9113 section 6.5.2 reserves ENABLE_PUSH for clients.
                 # Any occurrence in a server's SETTINGS is a connection error.
