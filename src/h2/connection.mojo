@@ -737,6 +737,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     def send_rst_stream(mut self, stream_id: UInt32, code: UInt32) raises:
         """Queues and synchronously flushes RST_STREAM.
 
+        Marks the stream reset locally so it no longer occupies a
+        SETTINGS_MAX_CONCURRENT_STREAMS slot.
+
         Args:
             stream_id: The stream to reset.
             code: One of the ERR_* error codes.
@@ -745,6 +748,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             On queue capacity or transport write errors.
         """
         self.flush_output()
+        if stream_id in self.streams:
+            self.streams[stream_id].local_reset = True
+            self.streams[stream_id].reset_code = code
         self.queue_rst_stream(stream_id, code)
         self.flush_output()
 

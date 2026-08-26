@@ -5,7 +5,8 @@
 - Applies the peer's SETTINGS_HEADER_TABLE_SIZE to the HPACK encoder and
   emits the required dynamic table size update on the next header block.
 - Refuses locally opened streams that would exceed the peer's
-  SETTINGS_MAX_CONCURRENT_STREAMS.
+  SETTINGS_MAX_CONCURRENT_STREAMS. A locally sent RST_STREAM frees that
+  slot so a later open can proceed.
 - Shortened the README and added contributor, issue, and pull-request
   templates.
 - Aligned the weekly HTTP/2 state job timeout with the runner's allowed range.

@@ -4,6 +4,7 @@
 from std.testing import assert_equal, assert_false, assert_true
 
 from h2 import (
+    ERR_CANCEL,
     FLAG_END_HEADERS,
     FLAG_END_STREAM,
     FRAME_CONTINUATION,
@@ -293,6 +294,16 @@ def test_open_stream_honors_peer_max_concurrent() raises:
     assert_true("MAX_CONCURRENT_STREAMS" in msg, msg)
 
 
+def test_rst_frees_concurrent_stream_slot() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_MAX_CONCURRENT_STREAMS)
+    put_u32_be(payload, 1)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    conn.send_rst_stream(1, ERR_CANCEL)
+    assert_equal(conn.open_stream(), 3)
+
+
 def test_process_frame_ignores_unknown_type() raises:
     var conn = make_client()
     conn.process_frame(make_frame(0xFE, 0, 0, List[Byte]()))
@@ -311,5 +322,6 @@ def main() raises:
     test_process_frame_validates_payload_length_and_limit()
     test_settings_header_table_size_updates_encoder()
     test_open_stream_honors_peer_max_concurrent()
+    test_rst_frees_concurrent_stream_slot()
     test_process_frame_ignores_unknown_type()
     print("test_h2_dispatch: all tests passed")
