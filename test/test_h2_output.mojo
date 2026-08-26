@@ -43,6 +43,43 @@ struct RejectingStream(IOStream):
         if self.reject_writes:
             raise Error("RejectingStream write rejected")
 
+    def write_some(self, data: Span[Byte, _]) raises -> Int:
+        self.write_all(data)
+        return len(data)
+
+    def set_read_timeout(self, nanos: Int64) raises:
+        _ = nanos
+
+    def set_nodelay(self, enabled: Bool) raises:
+        _ = enabled
+
+    def close(mut self):
+        pass
+
+
+struct PartialThenFailStream(IOStream):
+    """Accepts a fixed prefix on the first write, then fails."""
+
+    var _accepted: Int
+
+    def __init__(out self):
+        self._accepted = 0
+
+    def read_exact(self, n: Int) raises -> List[Byte]:
+        _ = n
+        raise Error("PartialThenFailStream must not be read")
+
+    def write_all(self, data: Span[Byte, _]) raises:
+        _ = data
+        raise Error("PartialThenFailStream does not support write_all")
+
+    def write_some(self, data: Span[Byte, _]) raises -> Int:
+        if self._accepted > 0:
+            raise Error("flush failed after partial write")
+        var n = min(5, len(data))
+        self._accepted = n
+        return n
+
     def set_read_timeout(self, nanos: Int64) raises:
         _ = nanos
 
@@ -519,6 +556,22 @@ def test_failed_flush_retains_output() raises:
     assert_equal(conn.pending_output_len(), 17, "failed flush retains bytes")
 
 
+def test_failed_flush_drops_accepted_prefix() raises:
+    var conn = Http2Connection(PartialThenFailStream(), is_client=True)
+    _ = conn.take_pending_output()
+    conn.queue_ping(0)
+    assert_equal(conn.pending_output_len(), 17)
+    var raised = False
+    try:
+        conn.flush_output()
+    except:
+        raised = True
+    assert_true(raised, "flush propagates errors after a partial write")
+    assert_equal(
+        conn.pending_output_len(), 12, "accepted prefix is dropped from the queue"
+    )
+
+
 def test_local_goaway_blocks_open_stream() raises:
     var conn = make_client()
     assert_equal(conn.live_stream_count(), 0)
@@ -628,6 +681,7 @@ def main() raises:
     test_queue_bound_is_atomic()
     test_dispatch_backpressure_is_retryable()
     test_failed_flush_retains_output()
+    test_failed_flush_drops_accepted_prefix()
     test_local_goaway_blocks_open_stream()
     test_begin_graceful_shutdown_and_live_count()
     test_keepalive_ping_is_caller_driven()

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `flush_output` writes with `write_some` and drops any prefix the
+  transport accepted, so a failed flush can be retried without
+  duplicating bytes already on the wire. Requires mojo-net `v0.2.3`.
 - Documented that `Http2Connection` is caller-driven on one thread, with no
   background event loop.
 - Added caller-driven keepalive helpers: `touch_keepalive` records activity,

@@ -403,19 +403,36 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         return output^
 
     def flush_output(mut self) raises:
-        """Writes every queued byte through the blocking stream.
+        """Writes queued bytes, dropping any prefix the transport accepted.
 
-        The queue is cleared only after `write_all` succeeds. A transport
-        error makes the connection unusable because a partial write cannot
-        be resumed through the blocking `IOStream` contract.
+        Loops `write_some` until the queue is empty. If a call raises after
+        accepting some bytes, those bytes are dropped so a retry does not
+        duplicate them on the wire. Bytes the transport never accepted stay
+        queued.
 
         Raises:
-            On transport write errors.
+            On transport write errors, including a zero-length `write_some`
+            on a non-empty remainder.
         """
-        if len(self._pending_output) == 0:
-            return
-        self.stream.write_all(Span(self._pending_output))
-        self._pending_output = List[Byte]()
+        var offset = 0
+        try:
+            while offset < len(self._pending_output):
+                var n = self.stream.write_some(
+                    Span(self._pending_output)[offset:]
+                )
+                if n <= 0:
+                    raise Error("http2: write_some returned 0")
+                var remaining = len(self._pending_output) - offset
+                if n > remaining:
+                    n = remaining
+                offset += n
+            self._pending_output = List[Byte]()
+        except error:
+            if offset > 0:
+                self._pending_output = List[Byte](
+                    Span(self._pending_output)[offset:]
+                )
+            raise error
 
     def _read_frame(mut self) raises -> Frame:
         """Read one frame, enforcing our max frame size."""
