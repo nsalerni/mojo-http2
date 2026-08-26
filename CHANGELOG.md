@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added caller-driven keepalive helpers: `touch_keepalive` records activity,
+  and `maybe_keepalive_ping` queues a PING after an idle interval. The first
+  call starts the clock without sending.
 - Refuses locally opened streams after this endpoint has sent GOAWAY.
   `begin_graceful_shutdown` queues GOAWAY with NO_ERROR;
   `live_stream_count` reports streams that are still open or half-closed.

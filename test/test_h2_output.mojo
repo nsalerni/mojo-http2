@@ -564,6 +564,54 @@ def test_begin_graceful_shutdown_and_live_count() raises:
     assert_equal(conn.live_stream_count(), 0, "reset streams do not count")
 
 
+def test_keepalive_ping_is_caller_driven() raises:
+    var conn = make_client()
+    assert_false(
+        conn.maybe_keepalive_ping(100, 50), "first call starts the clock"
+    )
+    assert_equal(conn.pending_output_len(), 0)
+    assert_false(
+        conn.maybe_keepalive_ping(149, 50), "still inside the interval"
+    )
+    assert_true(conn.maybe_keepalive_ping(150, 50), "idle interval elapsed")
+    assert_equal(conn.pending_output_len(), 17, "PING is one 9+8 byte frame")
+    _ = conn.take_pending_output()
+    conn.touch_keepalive(200)
+    assert_false(
+        conn.maybe_keepalive_ping(249, 50), "touch postpones the ping"
+    )
+    assert_true(conn.maybe_keepalive_ping(250, 50))
+
+    var raised = False
+    try:
+        _ = conn.maybe_keepalive_ping(300, 0)
+    except error:
+        raised = True
+        assert_true("interval" in String(error), String(error))
+    assert_true(raised, "non-positive interval is rejected")
+
+    conn = make_client()
+    assert_false(
+        conn.maybe_keepalive_ping(0, 10), "zero timestamp starts the clock"
+    )
+    assert_true(
+        conn.maybe_keepalive_ping(10, 10), "zero start time still elapses"
+    )
+
+    conn = make_client()
+    conn.queue_goaway(ERR_NO_ERROR)
+    _ = conn.take_pending_output()
+    assert_false(
+        conn.maybe_keepalive_ping(1000, 1), "no ping after local GOAWAY"
+    )
+
+    conn = make_client()
+    conn.goaway_code = ERR_NO_ERROR
+    assert_false(
+        conn.maybe_keepalive_ping(1000, 1), "no ping after received GOAWAY"
+    )
+
+
 def main() raises:
     test_incremental_startup_and_every_split_point()
     test_client_startup_is_queued_without_writes()
@@ -582,4 +630,5 @@ def main() raises:
     test_failed_flush_retains_output()
     test_local_goaway_blocks_open_stream()
     test_begin_graceful_shutdown_and_live_count()
+    test_keepalive_ping_is_caller_driven()
     print("test_h2_output: all tests passed")
