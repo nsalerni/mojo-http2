@@ -141,7 +141,7 @@ def main() -> None:
         run(build_command, PACKAGE_BUILD_TIMEOUT_SECONDS)
 
         package = one_package(
-            output, "mojo-http2-0.2.5-*.conda", "mojo-http2 0.2.5"
+            output, "mojo-http2-0.2.6-*.conda", "mojo-http2 0.2.6"
         )
 
         test_command = [
