@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Documented that `Http2Connection` is caller-driven on one thread, with no
+  background event loop.
 - Added caller-driven keepalive helpers: `touch_keepalive` records activity,
   and `maybe_keepalive_ping` queues a PING after an idle interval. The first
   call starts the clock without sending.

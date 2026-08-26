@@ -53,6 +53,13 @@ request over TLS with the `h2` ALPN token. See
 Header names and values are `String` (UTF-8). HTTP/2 allows arbitrary octets
 in field values; gRPC uses base64 `-bin` metadata instead.
 
+## Concurrency
+
+`Http2Connection` is caller-driven: blocking helpers (`process_next_frame`,
+`send_*`) or readiness-driven `feed_input` / `queue_*` / `take_pending_output`.
+There is no background thread or event loop. One connection is handled on the
+thread that pumps it. Scale-out is several processes, not an async runtime.
+
 ## Non-goals
 
 PUSH_PROMISE and the deprecated RFC 7540 priority tree. Details:
