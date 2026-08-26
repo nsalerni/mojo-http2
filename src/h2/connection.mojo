@@ -484,12 +484,17 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         return True
 
     def _local_concurrent_streams(self) raises -> Int:
-        """Counts locally-initiated streams that still occupy a slot."""
+        """Counts locally-initiated streams that still occupy a slot.
+
+        Open and half-closed streams both count ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
+        §5.1.2). A stream is released only after both sides end, or after
+        RST_STREAM.
+        """
         var active = 0
         for id in self.stream_ids:
             if (id % 2 == 1) != self.is_client:
                 continue
-            if self.streams[id].local_end:
+            if self.streams[id].local_end and self.streams[id].end_stream:
                 continue
             if Bool(self.streams[id].reset_code):
                 continue

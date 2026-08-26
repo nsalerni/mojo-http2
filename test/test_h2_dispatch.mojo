@@ -304,6 +304,24 @@ def test_rst_frees_concurrent_stream_slot() raises:
     assert_equal(conn.open_stream(), 3)
 
 
+def test_half_closed_local_still_counts() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_MAX_CONCURRENT_STREAMS)
+    put_u32_be(payload, 1)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    conn.streams[1].local_end = True
+    var raised = False
+    var msg = String()
+    try:
+        _ = conn.open_stream()
+    except error:
+        raised = True
+        msg = String(error)
+    assert_true(raised, "half-closed local stream still occupies a slot")
+    assert_true("MAX_CONCURRENT_STREAMS" in msg, msg)
+
+
 def test_process_frame_ignores_unknown_type() raises:
     var conn = make_client()
     conn.process_frame(make_frame(0xFE, 0, 0, List[Byte]()))
@@ -323,5 +341,6 @@ def main() raises:
     test_settings_header_table_size_updates_encoder()
     test_open_stream_honors_peer_max_concurrent()
     test_rst_frees_concurrent_stream_slot()
+    test_half_closed_local_still_counts()
     test_process_frame_ignores_unknown_type()
     print("test_h2_dispatch: all tests passed")

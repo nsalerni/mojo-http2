@@ -376,7 +376,9 @@ struct Encoder(Movable):
     var table: DynamicTable
     """Dynamic table mirroring the insertions the peer's decoder makes."""
     var pending_table_size: Int
-    """Size update to emit at the start of the next header block, or -1."""
+    """Final size update to emit at the start of the next header block, or -1."""
+    var pending_min_table_size: Int
+    """Smallest pending size, emitted before the final size when they differ."""
 
     def __init__(out self, max_table_size: Int = 4096):
         """Creates an encoder with an empty dynamic table.
@@ -387,23 +389,34 @@ struct Encoder(Movable):
         """
         self.table = DynamicTable(max_table_size)
         self.pending_table_size = -1
+        self.pending_min_table_size = -1
 
     def set_max_size(mut self, max_size: Int):
         """Lowers or raises the encoder table to the peer's decoder ceiling.
 
-        Evicts entries that no longer fit and emits a dynamic table size
-        update at the start of the next header block
-        ([RFC 7541](https://www.rfc-editor.org/rfc/rfc7541) §6.3).
+        Evicts entries that no longer fit. If several size changes land
+        before the next header block, the smallest size is emitted first
+        and then the final size ([RFC 7541](https://www.rfc-editor.org/rfc/rfc7541)
+        §4.2, §6.3).
 
         Args:
             max_size: The peer's SETTINGS_HEADER_TABLE_SIZE, in bytes.
         """
         self.table.set_max_size(max_size)
+        if self.pending_table_size < 0:
+            self.pending_min_table_size = max_size
+        elif max_size < self.pending_min_table_size:
+            self.pending_min_table_size = max_size
         self.pending_table_size = max_size
 
     def _flush_table_size_update(mut self, mut out_buf: List[Byte]):
         if self.pending_table_size >= 0:
+            if self.pending_min_table_size != self.pending_table_size:
+                encode_integer(
+                    self.pending_min_table_size, 5, 0x20, out_buf
+                )
             encode_integer(self.pending_table_size, 5, 0x20, out_buf)
+            self.pending_min_table_size = -1
             self.pending_table_size = -1
 
     def _find(self, field: HeaderField) -> Tuple[Int, Int]:
