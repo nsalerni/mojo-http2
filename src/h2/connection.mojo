@@ -549,7 +549,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         # Preflight a conservative literal representation before mutating the
         # stateful HPACK encoder. Huffman output is never longer than raw input
         # in this encoder; the per-field allowance covers integer prefixes.
-        var upper_bound = 0
+        # Two dynamic table size updates (RFC 7541 §4.2) need at most 12 bytes.
+        var upper_bound = 12
         for f in fields:
             upper_bound += f.name.byte_length() + f.value.byte_length() + 32
         var max_len = Int(self.peer_settings.max_frame_size)
@@ -559,8 +560,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         )
 
         var block = List[Byte]()
-        for f in fields:
-            self.hpack_enc.encode_field(f, block)
+        self.hpack_enc.encode(fields, block)
         var frame_count = max(1, (len(block) + max_len - 1) // max_len)
         self._ensure_output_capacity(
             len(block) + frame_count * FRAME_HEADER_LEN

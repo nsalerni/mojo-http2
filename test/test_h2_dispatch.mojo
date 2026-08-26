@@ -17,6 +17,7 @@ from h2 import (
     put_u32_be,
 )
 from h2.frame import SETTINGS_HEADER_TABLE_SIZE, SETTINGS_MAX_CONCURRENT_STREAMS
+from hpack import HeaderField
 from net import IOStream
 from testutil import from_hex
 
@@ -277,6 +278,17 @@ def test_settings_header_table_size_updates_encoder() raises:
     assert_equal(conn.hpack_enc.pending_table_size, 256)
 
 
+def test_empty_headers_flush_table_size_update() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_HEADER_TABLE_SIZE)
+    put_u32_be(payload, 256)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    var empty = List[HeaderField]()
+    conn.queue_headers(1, Span(empty), end_stream=False)
+    assert_equal(conn.hpack_enc.pending_table_size, -1)
+
+
 def test_open_stream_honors_peer_max_concurrent() raises:
     var conn = make_client()
     var payload = List[Byte]()
@@ -339,6 +351,7 @@ def main() raises:
     test_process_frame_bounds_continuation_count()
     test_process_frame_validates_payload_length_and_limit()
     test_settings_header_table_size_updates_encoder()
+    test_empty_headers_flush_table_size_update()
     test_open_stream_honors_peer_max_concurrent()
     test_rst_frees_concurrent_stream_slot()
     test_half_closed_local_still_counts()
