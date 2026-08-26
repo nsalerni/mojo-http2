@@ -483,7 +483,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.stream_ids = remaining^
         return True
 
-    def _local_concurrent_streams(self) -> Int:
+    def _local_concurrent_streams(self) raises -> Int:
         """Counts locally-initiated streams that still occupy a slot."""
         var active = 0
         for id in self.stream_ids:
