@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Shortened the README and added contributor, issue, and pull-request
+  templates.
+- Aligned the weekly HTTP/2 state job timeout with the runner's allowed range.
+
 ## 0.2.5 - 2026-08-25
 
 - Verified the source and installed package against mojo-net 0.2.2 and
