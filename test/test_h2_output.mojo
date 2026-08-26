@@ -558,18 +558,27 @@ def test_failed_flush_retains_output() raises:
 
 
 def test_failed_flush_drops_accepted_prefix() raises:
+    var expected = Http2Connection(PartialThenFailStream(), is_client=True)
+    _ = expected.take_pending_output()
+    expected.queue_ping(0)
+    var full = expected.take_pending_output()
+    assert_equal(len(full), 17)
+    var suffix = List[Byte](Span(full)[5:])
+
     var conn = Http2Connection(PartialThenFailStream(), is_client=True)
     _ = conn.take_pending_output()
     conn.queue_ping(0)
-    assert_equal(conn.pending_output_len(), 17)
     var raised = False
     try:
         conn.flush_output()
     except:
         raised = True
     assert_true(raised, "flush propagates errors after a partial write")
+    var remaining = conn.take_pending_output()
     assert_equal(
-        conn.pending_output_len(), 12, "accepted prefix is dropped from the queue"
+        to_hex(Span(remaining)),
+        to_hex(Span(suffix)),
+        "accepted prefix is dropped from the queue",
     )
 
 
