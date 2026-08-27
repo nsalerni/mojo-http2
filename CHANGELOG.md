@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `H2TLSContext.client` and `server` take `StringSpan` for CA, certificate,
+  and key filesystem paths. Values are copied to `String` before calling
+  mojo-tls.
+
 - Expanded HTTP/2 state generation with DATA, HEADERS plus CONTINUATION,
   PRIORITY, PUSH_PROMISE, padded DATA, unknown frames, reserved-bit
   WINDOW_UPDATE, and duplicate SETTINGS. HPACK random blocks now cover

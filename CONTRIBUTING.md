@@ -19,9 +19,10 @@ pixi run test
 - Public APIs follow the
   [Mojo docstring style](https://github.com/modular/modular/blob/main/mojo/stdlib/docs/docstring-style-guide.md).
 - This repo targets Mojo 1.0: `def` only (no `fn`), `comptime` not `alias`,
-  `std.`-prefixed imports, and explicit `.copy()` / `^` moves. Tests are
-  plain executables run by `tools/run_tests.py` (`mojo test` no longer
-  exists).
+  `std.`-prefixed imports, and explicit `.copy()` / `^` moves. SNI and
+  TLS filesystem paths take `StringSpan` and are copied to `String` at
+  the TLS FFI boundary. Tests are plain executables run by
+  `tools/run_tests.py` (`mojo test` no longer exists).
 
 ## Checks
 
