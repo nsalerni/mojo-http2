@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Expanded HTTP/2 state generation with DATA, HEADERS plus CONTINUATION,
+  PRIORITY, PUSH_PROMISE, padded DATA, unknown frames, reserved-bit
+  WINDOW_UPDATE, and duplicate SETTINGS. HPACK random blocks now cover
+  more gRPC header names, Huffman-unfriendly values, and swap/duplicate
+  mutations.
+
 ## 0.2.7 - 2026-08-27
 
 - `Http2Connection` accepts `initial_window_size` to advertise

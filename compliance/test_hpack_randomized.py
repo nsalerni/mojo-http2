@@ -86,11 +86,18 @@ HEADER_NAMES = [
     ":scheme",
     ":status",
     "accept",
+    "accept-encoding",
     "authorization",
     "cache-control",
+    "content-length",
     "content-type",
+    "cookie",
+    "grpc-accept-encoding",
+    "grpc-encoding",
     "grpc-message",
     "grpc-status",
+    "grpc-timeout",
+    "set-cookie",
     "te",
     "user-agent",
     "x-empty",
@@ -100,6 +107,7 @@ HEADER_NAMES = [
     "x-trace-bin",
 ]
 VALUE_ALPHABET = "abcdefghij0123456789-_ .~!*'()%/:;=+"
+HUFFMAN_BAIT = ["~~~", "***", "!!!", "    ", "////", "%%%%"]
 UTF8_VALUES = ["résumé", "你好世界", "aß☃z", "fire 🔥 ok"]
 
 
@@ -126,11 +134,17 @@ def positive_int(text: str) -> int:
 
 
 def random_value(rng: random.Random) -> str:
-    roll = rng.randrange(12)
+    roll = rng.randrange(16)
     if roll == 0:
         return ""
     if roll == 1:
         return rng.choice(UTF8_VALUES)
+    if roll == 2:
+        return rng.choice(HUFFMAN_BAIT) * rng.randint(1, 24)
+    if roll == 3:
+        return "".join(rng.choice("0123456789") for _ in range(rng.randint(1, 32)))
+    if roll == 4:
+        return "".join(rng.choice(VALUE_ALPHABET) for _ in range(rng.randint(96, 192)))
     return "".join(rng.choice(VALUE_ALPHABET) for _ in range(rng.randint(1, 96)))
 
 
@@ -139,7 +153,9 @@ def mutate_block(
 ) -> HeaderBlock:
     result = list(block)
     for _ in range(rng.randint(1, 3)):
-        operation = rng.choice(["append", "change", "drop", "repeat"])
+        operation = rng.choice(
+            ["append", "change", "drop", "repeat", "swap", "duplicate"]
+        )
         if operation == "append" or not result:
             result.append((rng.choice(HEADER_NAMES), random_value(rng)))
         elif operation == "change":
@@ -147,6 +163,12 @@ def mutate_block(
             result[index] = (result[index][0], random_value(rng))
         elif operation == "drop" and len(result) > 1:
             del result[rng.randrange(len(result))]
+        elif operation == "swap" and len(result) > 1:
+            left, right = rng.sample(range(len(result)), 2)
+            result[left], result[right] = result[right], result[left]
+        elif operation == "duplicate":
+            index = rng.randrange(len(result))
+            result.insert(rng.randrange(len(result) + 1), result[index])
         elif recent:
             prior = rng.choice(recent)
             result.insert(rng.randrange(len(result) + 1), rng.choice(prior))

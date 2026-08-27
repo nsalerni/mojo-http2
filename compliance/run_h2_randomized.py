@@ -18,6 +18,7 @@ import h2.config
 import h2.connection
 import h2.events
 import h2.exceptions
+from hpack.hpack import Encoder as HpackEncoder
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,7 +127,7 @@ def chunks_for_frames(frames: tuple[bytes, ...], rng: random.Random) -> tuple[in
 
 
 def make_state_case(index: int, rng: random.Random) -> StateCase:
-    category = index % 24
+    category = index % 36
     open_count = 0
     changed_settings: tuple[int, ...] = ()
     check_window = False
@@ -246,12 +247,84 @@ def make_state_case(index: int, rng: random.Random) -> StateCase:
         frames = (settings, ping, update)
         changed_settings = (1,)
         check_window = True
-    else:
+    elif category == 23:
         payload = setting(3, rng.randrange(0, 1025))
         settings = frame(4, 0x80, 0, payload, reserved_stream_bit=True)
         ping = frame(6, 0x80, 0, rng.randbytes(8), reserved_stream_bit=True)
         frames = (settings, ping)
         changed_settings = (3,)
+    elif category == 24:
+        frames = (frame(0, 0, 0, rng.randbytes(rng.randint(1, 8))),)
+        expected_error_code = 1
+    elif category == 25:
+        frames = (frame(1, 0x04, 0, rng.randbytes(rng.randint(1, 8))),)
+        expected_error_code = 1
+    elif category == 26:
+        frames = (frame(9, 0x04, rng.choice((1, 3)), rng.randbytes(rng.randint(1, 8))),)
+        expected_error_code = 1
+    elif category == 27:
+        open_count = 1
+        dependency = rng.choice((0, 3, 5))
+        payload = dependency.to_bytes(4, "big") + bytes((rng.randrange(256),))
+        frames = (frame(2, rng.choice((0, 0x80)), 1, payload),)
+    elif category == 28:
+        increment = rng.randrange(1, 1 << 20)
+        payload = (increment | 0x80000000).to_bytes(4, "big")
+        frames = (frame(8, 0, 0, payload),)
+        check_window = True
+    elif category == 29:
+        open_count = 1
+        pad = rng.randint(0, 7)
+        payload = bytes((pad,)) + rng.randbytes(rng.randint(1, 8)) + bytes(pad)
+        frames = (frame(0, 0x08, 1, payload),)
+    elif category == 30:
+        open_count = 1
+        block = HpackEncoder().encode(
+            [(":status", "200"), ("content-type", "application/grpc")]
+        )
+        if len(block) < 2:
+            frames = (frame(1, 0x04, 1, block),)
+        else:
+            split = rng.randint(1, len(block) - 1)
+            frames = (
+                frame(1, 0, 1, block[:split]),
+                frame(9, 0x04, 1, block[split:]),
+            )
+    elif category == 31:
+        frames = (
+            frame(0x0B, rng.randrange(256), 0, rng.randbytes(rng.randint(0, 8))),
+        )
+    elif category == 32:
+        first = rng.randrange(0, 1 << 16)
+        second = rng.randrange(0, 1 << 16)
+        frames = (frame(4, 0, 0, setting(1, first) + setting(1, second)),)
+        changed_settings = (1,)
+    elif category == 33:
+        first = rng.randrange(1, 1 << 16)
+        second = rng.randrange(1, 1 << 16)
+        frames = (
+            frame(8, 0, 0, first.to_bytes(4, "big")),
+            frame(8, 0, 0, second.to_bytes(4, "big")),
+        )
+        check_window = True
+    elif category == 34:
+        open_count = 1
+        frames = (
+            frame(3, 0, 1, (8).to_bytes(4, "big")),
+            frame(0, 0x01, 1, rng.randbytes(4)),
+        )
+    else:
+        promised = 2
+        block = HpackEncoder().encode(
+            [
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":path", "/push"),
+                (":authority", "localhost"),
+            ]
+        )
+        frames = (frame(5, 0x04, 1, promised.to_bytes(4, "big") + block),)
+        expected_error_code = 1
 
     return StateCase(
         name=f"state-{index}-{category}",
