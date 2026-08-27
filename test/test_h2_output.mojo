@@ -188,6 +188,53 @@ def test_client_startup_is_queued_without_writes() raises:
     assert_false(client.our_settings.enable_push, "client disables push")
 
 
+def test_configurable_initial_window() raises:
+    var small = Http2Connection(
+        RejectingStream(), is_client=True, initial_window_size=1024
+    )
+    assert_equal(small.our_settings.initial_window_size, 1024)
+    assert_equal(small.recv_window, 65535, "connection window stays default")
+    var small_sid = small.open_stream()
+    assert_equal(small.streams[small_sid].recv_window, 1024)
+    var small_out = small.take_pending_output()
+    var small_hex = to_hex(Span(small_out))
+    assert_true(
+        "000400000400" in small_hex, "SETTINGS carries INITIAL_WINDOW_SIZE=1024"
+    )
+    assert_true(
+        "00000408" not in small_hex, "smaller window needs no WINDOW_UPDATE"
+    )
+
+    var large = Http2Connection(
+        RejectingStream(), is_client=True, initial_window_size=1048576
+    )
+    assert_equal(large.our_settings.initial_window_size, 1048576)
+    assert_equal(large.recv_window, 1048576, "connection window matches stream")
+    var large_sid = large.open_stream()
+    assert_equal(large.streams[large_sid].recv_window, 1048576)
+    var large_out = large.take_pending_output()
+    var large_hex = to_hex(Span(large_out))
+    assert_true(
+        "000400100000" in large_hex,
+        "SETTINGS carries INITIAL_WINDOW_SIZE=1048576",
+    )
+    # WINDOW_UPDATE increment is 1048576 - 65535 = 983041 = 0x000F0001.
+    assert_true(
+        "0000040800000000000f0001" in large_hex,
+        "connection WINDOW_UPDATE raises the session window",
+    )
+
+    var raised = False
+    try:
+        _ = Http2Connection(
+            RejectingStream(), is_client=True, initial_window_size=0x80000000
+        )
+    except error:
+        raised = True
+        assert_true("INITIAL_WINDOW_SIZE" in String(error), String(error))
+    assert_true(raised, "window above 2^31-1 is rejected")
+
+
 def test_enable_push_obeys_endpoint_roles() raises:
     for value in [UInt32(0), UInt32(1), UInt32(2)]:
         var client = make_client()
@@ -678,6 +725,7 @@ def test_keepalive_ping_is_caller_driven() raises:
 def main() raises:
     test_incremental_startup_and_every_split_point()
     test_client_startup_is_queued_without_writes()
+    test_configurable_initial_window()
     test_enable_push_obeys_endpoint_roles()
     test_incremental_connection_error_is_terminal()
     test_incremental_dispatch_budget_resumes_in_order()

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `Http2Connection` accepts `initial_window_size` to advertise
+  SETTINGS_INITIAL_WINDOW_SIZE and size new stream receive windows. Values
+  above the 65,535 RFC default also send a connection-level WINDOW_UPDATE
+  so the larger stream budget is not capped by the session window. The
+  default constructor is unchanged: the identifier is omitted when the
+  window is 65,535.
+
 - Pin source, recipe, and package tests to mojo-net `v0.2.4`. Release
   0.2.6 named `v0.2.3`, but that git tag still built a 0.2.2 conda
   package. The recipe lower bound is now `>=0.2.4` so `write_some` is
