@@ -72,6 +72,42 @@ class RandomizedRunnerTests(unittest.TestCase):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     randomized.parse_args(arguments)
 
+    def test_state_mismatch_ignores_window_update_acks(self):
+        case = randomized.StateCase(
+            name="data",
+            open_count=1,
+            frames=(randomized.frame(0, 0x01, 1, b"abcd"),),
+            chunk_sizes=(13,),
+        )
+        reference = {
+            "status": "OK",
+            "output": (),
+            "settings": {},
+            "send_window": 65535,
+            "goaway_last": None,
+            "goaway_code": None,
+        }
+        with patch.object(randomized, "reference_state", return_value=reference):
+            reason = randomized.state_mismatch(
+                case,
+                {
+                    **reference,
+                    "output": ((8, 0, 0, "00000004"),),
+                },
+            )
+        self.assertIsNone(reason)
+
+        with patch.object(randomized, "reference_state", return_value=reference):
+            reason = randomized.state_mismatch(
+                case,
+                {
+                    **reference,
+                    "output": ((6, 1, 0, "abcdefgh"),),
+                },
+            )
+        self.assertIsNotNone(reason)
+        self.assertTrue(reason.startswith("output:"))
+
     def test_mismatch_writes_a_compact_reproduction(self):
         with tempfile.TemporaryDirectory() as temp:
             artifact = Path(temp) / "failure.json"

@@ -6,7 +6,9 @@
   PRIORITY, PUSH_PROMISE, padded DATA, unknown frames, reserved-bit
   WINDOW_UPDATE, and duplicate SETTINGS. HPACK random blocks now cover
   more gRPC header names, Huffman-unfriendly values, and swap/duplicate
-  mutations.
+  mutations. Connection-state comparison ignores WINDOW_UPDATE output:
+  Mojo replenishes the receive window after DATA, and hyper-h2 does not
+  until the caller acknowledges the bytes.
 
 ## 0.2.7 - 2026-08-27
 

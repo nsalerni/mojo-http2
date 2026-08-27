@@ -388,6 +388,19 @@ def output_signatures(data: bytes) -> tuple[tuple[int, int, int, str], ...]:
     return tuple(signatures)
 
 
+def without_window_updates(
+    frames: object,
+) -> tuple[FrameSignature, ...]:
+    """Drops WINDOW_UPDATE frames from a compared output sequence.
+
+    RFC 9113 §6.9 lets a receiver replenish flow-control credit when it
+    chooses. Mojo queues a connection WINDOW_UPDATE from `_replenish`
+    after DATA; hyper-h2 does not until `acknowledge_received_data`.
+    """
+    signatures = cast(tuple[FrameSignature, ...], frames)
+    return tuple(member for member in signatures if member[0] != 8)
+
+
 def reference_state(case: StateCase) -> dict[str, object]:
     connection = h2.connection.H2Connection(
         config=h2.config.H2Configuration(client_side=True, header_encoding="utf-8")
@@ -557,7 +570,9 @@ def state_mismatch(case: StateCase, actual: dict[str, object]) -> str | None:
                     f"mojo={code}"
                 )
         return None
-    if actual.get("output") != expected["output"]:
+    if without_window_updates(actual.get("output", ())) != without_window_updates(
+        expected["output"]
+    ):
         return f"output: hyper-h2={expected['output']} mojo={actual.get('output')}"
     expected_settings = cast(dict[int, int], expected["settings"])
     actual_settings = cast(dict[int, int], actual.get("settings", {}))
