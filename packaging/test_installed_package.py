@@ -96,7 +96,7 @@ def main() -> None:
             PACKAGE_BUILD_TIMEOUT_SECONDS,
         )
         net_package = one_package(
-            net_output, "mojo-net-0.2.2-*.conda", "mojo-net 0.2.2"
+            net_output, "mojo-net-0.2.4-*.conda", "mojo-net 0.2.4"
         )
         shutil.copy2(net_package, channel_subdir / net_package.name)
         index_channel(channel)

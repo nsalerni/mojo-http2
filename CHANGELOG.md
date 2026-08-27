@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Pin source, recipe, and package tests to mojo-net `v0.2.4`, the first
+  release whose package version includes `write_some`.
+
 ## 0.2.6 - 2026-08-26
 
 - `flush_output` writes with `write_some` and drops any prefix the
