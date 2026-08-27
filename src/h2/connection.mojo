@@ -115,13 +115,17 @@ struct StreamState(Movable):
     """Total DATA bytes received (after padding removal), for the check
     against `expected_content_length`."""
 
-    def __init__(out self, id: UInt32, send_window: Int):
+    def __init__(
+        out self, id: UInt32, send_window: Int, recv_window: Int = DEFAULT_WINDOW_SIZE
+    ):
         """Creates a fresh stream in its initial receive state.
 
         Args:
             id: The stream identifier.
             send_window: Initial send window, from the peer's
                 SETTINGS_INITIAL_WINDOW_SIZE.
+            recv_window: Initial receive window, from the SETTINGS we
+                advertised as SETTINGS_INITIAL_WINDOW_SIZE.
         """
         self.id = id
         self.headers = List[HeaderField]()
@@ -132,7 +136,7 @@ struct StreamState(Movable):
         self.end_stream = False
         self.reset_code = None
         self.send_window = send_window
-        self.recv_window = DEFAULT_WINDOW_SIZE
+        self.recv_window = recv_window
         self.local_reset = False
         self.local_end = False
         self.expected_content_length = -1
@@ -248,7 +252,13 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     var _last_keepalive_ns: Optional[Int64]
     """Caller-supplied timestamp of the last keepalive activity, if any."""
 
-    def __init__(out self, var stream: Self.S, *, is_client: Bool) raises:
+    def __init__(
+        out self,
+        var stream: Self.S,
+        *,
+        is_client: Bool,
+        initial_window_size: UInt32 = DEFAULT_WINDOW_SIZE,
+    ) raises:
         """Initializes the connection without transport reads or writes.
 
         As a client, queues the [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
@@ -256,22 +266,33 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         `feed_input` or `process_next_frame` validates the complete client
         preface. Neither role waits for peer bytes during construction.
 
+        A non-default `initial_window_size` is advertised as
+        SETTINGS_INITIAL_WINDOW_SIZE and used as each new stream's receive
+        window. When it is larger than the RFC default of 65,535, a
+        connection-level WINDOW_UPDATE raises the connection receive window
+        to match; the connection window cannot be reduced through SETTINGS.
+
         Args:
             stream: The connected stream; ownership is taken and the
                 no-delay latency hint is applied.
             is_client: True to act as the client endpoint, False as the
                 server.
+            initial_window_size: Per-stream receive window advertised to
+                the peer. Must not exceed 2^31 - 1.
 
         Raises:
-            If the latency hint cannot be applied or startup output cannot
-            fit in the default queue.
+            If `initial_window_size` is too large, the latency hint cannot
+            be applied, or startup output cannot fit in the default queue.
         """
+        if initial_window_size > 0x7FFFFFFF:
+            raise Error("h2: INITIAL_WINDOW_SIZE too large")
         self.stream = stream^
         self.is_client = is_client
         self.hpack_enc = HpackEncoder()
         self.hpack_dec = HpackDecoder()
         self.next_stream_id = 1 if is_client else 2
         self.our_settings = Settings()
+        self.our_settings.initial_window_size = initial_window_size
         self.peer_settings = Settings()
         self.peer_settings_received = False
         self.send_window = DEFAULT_WINDOW_SIZE
@@ -312,14 +333,38 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self.our_settings.enable_push = False
             self._ensure_output_capacity(
                 StaticString(CONNECTION_PREFACE).byte_length()
+                + self._initial_settings_output_size()
             )
             self._pending_output.extend(
                 StaticString(CONNECTION_PREFACE).as_bytes()
             )
             self._queue_initial_settings()
 
+    def _initial_settings_output_size(self) -> Int:
+        """Bytes for the preface SETTINGS frame and any companion WINDOW_UPDATE.
+
+        Server SETTINGS is 12 payload bytes (MAX_CONCURRENT_STREAMS and
+        MAX_HEADER_LIST_SIZE). Clients add ENABLE_PUSH. A non-default
+        INITIAL_WINDOW_SIZE adds 6 more, and a larger-than-default window
+        also sends a 4-byte connection WINDOW_UPDATE.
+        """
+        var payload = 12
+        if self.is_client:
+            payload += 6
+        if self.our_settings.initial_window_size != DEFAULT_WINDOW_SIZE:
+            payload += 6
+        var total = FRAME_HEADER_LEN + payload
+        if Int(self.our_settings.initial_window_size) > DEFAULT_WINDOW_SIZE:
+            total += FRAME_HEADER_LEN + 4
+        return total
+
     def _queue_initial_settings(mut self) raises:
-        """Queues the local connection preface SETTINGS frame."""
+        """Queues the local connection preface SETTINGS frame.
+
+        SETTINGS and a companion connection WINDOW_UPDATE are reserved as
+        one unit so a queue-limit failure cannot advertise a larger stream
+        window without raising the session window.
+        """
         var our = List[Byte]()
         if self.is_client:
             # This implementation does not expose server push, so clients
@@ -330,7 +375,23 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         put_u32_be(our, UInt32(self.max_concurrent_streams))
         put_u16_be(our, SETTINGS_MAX_HEADER_LIST_SIZE)
         put_u32_be(our, UInt32(self.max_header_list_size))
-        self._queue_frame(FRAME_SETTINGS, 0, 0, our^)
+        # The RFC default is 65,535; omit the identifier unless the caller
+        # asked for a different stream receive window.
+        if self.our_settings.initial_window_size != DEFAULT_WINDOW_SIZE:
+            put_u16_be(our, SETTINGS_INITIAL_WINDOW_SIZE)
+            put_u32_be(our, self.our_settings.initial_window_size)
+        var advertised = Int(self.our_settings.initial_window_size)
+        self._ensure_output_capacity(self._initial_settings_output_size())
+        self._queue_frame_unchecked(FRAME_SETTINGS, 0, 0, our^)
+        if advertised > DEFAULT_WINDOW_SIZE:
+            # SETTINGS_INITIAL_WINDOW_SIZE is stream-level only. Raise the
+            # connection window with WINDOW_UPDATE so the larger stream
+            # budget is not capped at the 65,535 connection default.
+            var delta = advertised - DEFAULT_WINDOW_SIZE
+            self.recv_window = advertised
+            var inc = List[Byte](capacity=4)
+            put_u32_be(inc, UInt32(delta))
+            self._queue_frame_unchecked(FRAME_WINDOW_UPDATE, 0, 0, inc)
 
     # --- low-level frame I/O ---
 
@@ -453,7 +514,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         """Create the stream's state record if it does not exist yet."""
         if id not in self.streams:
             self.streams[id] = StreamState(
-                id, Int(self.peer_settings.initial_window_size)
+                id,
+                Int(self.peer_settings.initial_window_size),
+                Int(self.our_settings.initial_window_size),
             )
             self.stream_ids.append(id)
             self._streams_opened += 1
@@ -1069,13 +1132,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         var preface_len = StaticString(CONNECTION_PREFACE).byte_length()
         if self._preface_received < preface_len:
             var remaining = preface_len - self._preface_received
-            var required_output = (
-                FRAME_HEADER_LEN + 12
-                if len(data) >= remaining
-                else FRAME_HEADER_LEN + 8
-            )
-            # Reserve before consuming bytes so a retry can use the same span.
-            self._ensure_output_capacity(required_output)
+            # Reserve the full SETTINGS (and companion WINDOW_UPDATE) before
+            # accepting any preface byte. A smaller fallback would let a
+            # short first chunk commit bytes that a later retry cannot
+            # reconstruct once capacity is raised.
+            self._ensure_output_capacity(self._initial_settings_output_size())
             var expected = StaticString(CONNECTION_PREFACE).as_bytes()
             var take = min(remaining, len(data))
             for i in range(take):
@@ -1127,7 +1188,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             afterwards.
         """
         self.flush_output()
-        self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
+        if not self.input_preface_complete():
+            # Startup SETTINGS can exceed the generic ACK bound. Reserve
+            # that output before read_exact consumes the transport preface.
+            self._ensure_output_capacity(self._initial_settings_output_size())
         try:
             if not self.input_preface_complete():
                 var preface = self.stream.read_exact(
@@ -1135,6 +1199,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                     - self._preface_received
                 )
                 _ = self.feed_input(Span(preface))
+                # Flush SETTINGS (and WINDOW_UPDATE) so the first peer
+                # frame's automatic responses have queue room.
+                self.flush_output()
+            self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
             var frame = self._read_frame()
             self.process_frame(frame^)
             while self._pending_header_stream != 0:

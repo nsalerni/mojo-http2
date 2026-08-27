@@ -91,6 +91,48 @@ struct PartialThenFailStream(IOStream):
         pass
 
 
+struct ScriptedStream(IOStream):
+    """Serves queued input bytes and records writes.
+
+    `read_exact` and `write_some` take an immutable `self`, so the byte
+    buffers live behind pointers owned by the test.
+    """
+
+    var incoming: Pointer[List[Byte], MutUntrackedOrigin]
+    var outgoing: Pointer[List[Byte], MutUntrackedOrigin]
+
+    def __init__(
+        out self,
+        incoming: Pointer[List[Byte], MutUntrackedOrigin],
+        outgoing: Pointer[List[Byte], MutUntrackedOrigin],
+    ):
+        self.incoming = incoming
+        self.outgoing = outgoing
+
+    def read_exact(self, n: Int) raises -> List[Byte]:
+        if n < 0 or n > len(self.incoming[]):
+            raise Error("ScriptedStream EOF")
+        var out = List[Byte](Span(self.incoming[])[0:n])
+        self.incoming[] = List[Byte](Span(self.incoming[])[n:])
+        return out^
+
+    def write_all(self, data: Span[Byte, _]) raises:
+        _ = self.write_some(data)
+
+    def write_some(self, data: Span[Byte, _]) raises -> Int:
+        self.outgoing[].extend(data)
+        return len(data)
+
+    def set_read_timeout(self, nanos: Int64) raises:
+        _ = nanos
+
+    def set_nodelay(self, enabled: Bool) raises:
+        _ = enabled
+
+    def close(mut self):
+        pass
+
+
 def make_client() raises -> Http2Connection[RejectingStream]:
     var conn = Http2Connection(RejectingStream(), is_client=True)
     _ = conn.take_pending_output()
@@ -186,6 +228,166 @@ def test_client_startup_is_queued_without_writes() raises:
         ),
     )
     assert_false(client.our_settings.enable_push, "client disables push")
+
+
+def test_configurable_initial_window() raises:
+    var small = Http2Connection(
+        RejectingStream(), is_client=True, initial_window_size=1024
+    )
+    assert_equal(small.our_settings.initial_window_size, 1024)
+    assert_equal(small.recv_window, 65535, "connection window stays default")
+    var small_sid = small.open_stream()
+    assert_equal(small.streams[small_sid].recv_window, 1024)
+    var small_out = small.take_pending_output()
+    var small_hex = to_hex(Span(small_out))
+    assert_true(
+        "000400000400" in small_hex, "SETTINGS carries INITIAL_WINDOW_SIZE=1024"
+    )
+    assert_true(
+        "00000408" not in small_hex, "smaller window needs no WINDOW_UPDATE"
+    )
+
+    var large = Http2Connection(
+        RejectingStream(), is_client=True, initial_window_size=1048576
+    )
+    assert_equal(large.our_settings.initial_window_size, 1048576)
+    assert_equal(large.recv_window, 1048576, "connection window matches stream")
+    var large_sid = large.open_stream()
+    assert_equal(large.streams[large_sid].recv_window, 1048576)
+    var large_out = large.take_pending_output()
+    var large_hex = to_hex(Span(large_out))
+    assert_true(
+        "000400100000" in large_hex,
+        "SETTINGS carries INITIAL_WINDOW_SIZE=1048576",
+    )
+    # WINDOW_UPDATE increment is 1048576 - 65535 = 983041 = 0x000F0001.
+    # 9-byte header (length=4, type=WINDOW_UPDATE, stream 0) plus increment.
+    assert_true(
+        "000004080000000000000f0001" in large_hex,
+        "connection WINDOW_UPDATE raises the session window",
+    )
+
+    var raised = False
+    try:
+        _ = Http2Connection(
+            RejectingStream(), is_client=True, initial_window_size=0x80000000
+        )
+    except error:
+        raised = True
+        assert_true("INITIAL_WINDOW_SIZE" in String(error), String(error))
+    assert_true(raised, "window above 2^31-1 is rejected")
+
+
+def test_large_window_startup_is_atomic() raises:
+    var preface = from_hex(
+        "505249202a20485454502f322e300d0a0d0a534d0d0a0d0a"
+    )
+    var server = Http2Connection(
+        RejectingStream(), is_client=False, initial_window_size=1048576
+    )
+    # SETTINGS is 27 bytes; WINDOW_UPDATE is 13. 39 fits SETTINGS only.
+    server.max_pending_output_size = 39
+    var raised = False
+    try:
+        _ = server.feed_input(Span(preface))
+    except error:
+        raised = True
+        assert_true("outbound frame queue" in String(error), String(error))
+    assert_true(raised, "queue bound below SETTINGS+WINDOW_UPDATE is rejected")
+    assert_equal(server.pending_output_len(), 0, "no partial SETTINGS")
+    assert_equal(server.recv_window, 65535, "recv_window unchanged")
+    assert_false(server.input_preface_complete(), "preface not consumed")
+
+    server.max_pending_output_size = 1024
+    _ = server.feed_input(Span(preface))
+    assert_true(server.input_preface_complete())
+    assert_equal(server.recv_window, 1048576)
+    var out = server.take_pending_output()
+    var out_hex = to_hex(Span(out))
+    assert_true(
+        "000400100000" in out_hex, "retried SETTINGS carries the window"
+    )
+    assert_true(
+        "000004080000000000000f0001" in out_hex,
+        "retried WINDOW_UPDATE raises the session window",
+    )
+
+    # A one-byte preface chunk must fail the same reserve, not commit a
+    # byte that makes a later full-preface retry look malformed.
+    var split = Http2Connection(
+        RejectingStream(), is_client=False, initial_window_size=1048576
+    )
+    split.max_pending_output_size = 39
+    raised = False
+    try:
+        _ = split.feed_input(Span(preface)[0:1])
+    except error:
+        raised = True
+        assert_true("outbound frame queue" in String(error), String(error))
+    assert_true(raised, "partial preface still requires full startup output")
+    assert_equal(split.pending_output_len(), 0)
+    assert_false(split.input_preface_complete())
+    split.max_pending_output_size = 1024
+    _ = split.feed_input(Span(preface))
+    assert_true(split.input_preface_complete())
+    assert_equal(split.recv_window, 1048576)
+
+    # Blocking startup must not read_exact the preface when SETTINGS and
+    # WINDOW_UPDATE cannot both fit. RejectingStream raises if it is read.
+    var blocking = Http2Connection(
+        RejectingStream(), is_client=False, initial_window_size=1048576
+    )
+    blocking.max_pending_output_size = 39
+    raised = False
+    try:
+        blocking.process_next_frame()
+    except error:
+        raised = True
+        var message = String(error)
+        assert_true("outbound frame queue" in message, message)
+        assert_true("must not be read" not in message, message)
+    assert_true(raised, "blocking startup reserves before reading")
+    assert_false(blocking.input_preface_complete())
+    assert_equal(blocking.pending_output_len(), 0)
+    blocking.max_pending_output_size = 1024
+    _ = blocking.feed_input(Span(preface))
+    assert_true(blocking.input_preface_complete())
+
+    # A queue that fits SETTINGS plus WINDOW_UPDATE (40 bytes) must still
+    # acknowledge the first peer SETTINGS frame. Flushing startup output
+    # before that read leaves room for the ACK.
+    var settings = from_hex("000000040000000000")
+    var incoming = preface.copy()
+    incoming.extend(Span(settings))
+    var outgoing = List[Byte]()
+    var scripted = Http2Connection(
+        ScriptedStream(
+            incoming=Pointer(to=incoming).unsafe_origin_cast[
+                MutUntrackedOrigin
+            ](),
+            outgoing=Pointer(to=outgoing).unsafe_origin_cast[
+                MutUntrackedOrigin
+            ](),
+        ),
+        is_client=False,
+        initial_window_size=1048576,
+    )
+    scripted.max_pending_output_size = 40
+    scripted.process_next_frame()
+    assert_true(scripted.input_preface_complete())
+    assert_true(scripted.peer_settings_received)
+    assert_equal(len(incoming), 0, "preface and SETTINGS were consumed")
+    var flushed = to_hex(Span(outgoing))
+    assert_true(
+        "000400100000" in flushed, "flushed SETTINGS carries the window"
+    )
+    assert_true(
+        "000004080000000000000f0001" in flushed,
+        "flushed WINDOW_UPDATE raises the session window",
+    )
+    assert_true(
+        "000000040100000000" in flushed, "peer SETTINGS was acknowledged"
+    )
 
 
 def test_enable_push_obeys_endpoint_roles() raises:
@@ -678,6 +880,8 @@ def test_keepalive_ping_is_caller_driven() raises:
 def main() raises:
     test_incremental_startup_and_every_split_point()
     test_client_startup_is_queued_without_writes()
+    test_configurable_initial_window()
+    test_large_window_startup_is_atomic()
     test_enable_push_obeys_endpoint_roles()
     test_incremental_connection_error_is_terminal()
     test_incremental_dispatch_budget_resumes_in_order()
