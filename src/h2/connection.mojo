@@ -1188,14 +1188,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             afterwards.
         """
         self.flush_output()
-        var needed = 2 * (FRAME_HEADER_LEN + 4)
         if not self.input_preface_complete():
             # Startup SETTINGS can exceed the generic ACK bound. Reserve
             # that output before read_exact consumes the transport preface.
-            var startup = self._initial_settings_output_size()
-            if startup > needed:
-                needed = startup
-        self._ensure_output_capacity(needed)
+            self._ensure_output_capacity(self._initial_settings_output_size())
         try:
             if not self.input_preface_complete():
                 var preface = self.stream.read_exact(
@@ -1203,6 +1199,10 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                     - self._preface_received
                 )
                 _ = self.feed_input(Span(preface))
+                # Flush SETTINGS (and WINDOW_UPDATE) so the first peer
+                # frame's automatic responses have queue room.
+                self.flush_output()
+            self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
             var frame = self._read_frame()
             self.process_frame(frame^)
             while self._pending_header_stream != 0:

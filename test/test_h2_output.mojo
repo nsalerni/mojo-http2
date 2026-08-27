@@ -91,6 +91,48 @@ struct PartialThenFailStream(IOStream):
         pass
 
 
+struct ScriptedStream(IOStream):
+    """Serves queued input bytes and records writes.
+
+    `read_exact` and `write_some` take an immutable `self`, so the byte
+    buffers live behind pointers owned by the test.
+    """
+
+    var incoming: Pointer[List[Byte], MutUntrackedOrigin]
+    var outgoing: Pointer[List[Byte], MutUntrackedOrigin]
+
+    def __init__(
+        out self,
+        incoming: Pointer[List[Byte], MutUntrackedOrigin],
+        outgoing: Pointer[List[Byte], MutUntrackedOrigin],
+    ):
+        self.incoming = incoming
+        self.outgoing = outgoing
+
+    def read_exact(self, n: Int) raises -> List[Byte]:
+        if n < 0 or n > len(self.incoming[]):
+            raise Error("ScriptedStream EOF")
+        var out = List[Byte](Span(self.incoming[])[0:n])
+        self.incoming[] = List[Byte](Span(self.incoming[])[n:])
+        return out^
+
+    def write_all(self, data: Span[Byte, _]) raises:
+        _ = self.write_some(data)
+
+    def write_some(self, data: Span[Byte, _]) raises -> Int:
+        self.outgoing[].extend(data)
+        return len(data)
+
+    def set_read_timeout(self, nanos: Int64) raises:
+        _ = nanos
+
+    def set_nodelay(self, enabled: Bool) raises:
+        _ = enabled
+
+    def close(mut self):
+        pass
+
+
 def make_client() raises -> Http2Connection[RejectingStream]:
     var conn = Http2Connection(RejectingStream(), is_client=True)
     _ = conn.take_pending_output()
@@ -310,6 +352,42 @@ def test_large_window_startup_is_atomic() raises:
     blocking.max_pending_output_size = 1024
     _ = blocking.feed_input(Span(preface))
     assert_true(blocking.input_preface_complete())
+
+    # A queue that fits SETTINGS plus WINDOW_UPDATE (40 bytes) must still
+    # acknowledge the first peer SETTINGS frame. Flushing startup output
+    # before that read leaves room for the ACK.
+    var settings = from_hex("000000040000000000")
+    var incoming = preface.copy()
+    incoming.extend(Span(settings))
+    var outgoing = List[Byte]()
+    var scripted = Http2Connection(
+        ScriptedStream(
+            incoming=Pointer(to=incoming).unsafe_origin_cast[
+                MutUntrackedOrigin
+            ](),
+            outgoing=Pointer(to=outgoing).unsafe_origin_cast[
+                MutUntrackedOrigin
+            ](),
+        ),
+        is_client=False,
+        initial_window_size=1048576,
+    )
+    scripted.max_pending_output_size = 40
+    scripted.process_next_frame()
+    assert_true(scripted.input_preface_complete())
+    assert_true(scripted.peer_settings_received)
+    assert_equal(len(incoming), 0, "preface and SETTINGS were consumed")
+    var flushed = to_hex(Span(outgoing))
+    assert_true(
+        "000400100000" in flushed, "flushed SETTINGS carries the window"
+    )
+    assert_true(
+        "000004080000000000000f0001" in flushed,
+        "flushed WINDOW_UPDATE raises the session window",
+    )
+    assert_true(
+        "000000040100000000" in flushed, "peer SETTINGS was acknowledged"
+    )
 
 
 def test_enable_push_obeys_endpoint_roles() raises:

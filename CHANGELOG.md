@@ -13,6 +13,9 @@
   Servers reserve that startup output before accepting any client preface
   byte, including the blocking `process_next_frame` path, so a short
   first chunk cannot consume bytes that a later retry cannot reconstruct.
+  Blocking `process_next_frame` also flushes that startup output before
+  reading the first peer frame, so a queue that fits SETTINGS plus
+  WINDOW_UPDATE still has room to acknowledge peer SETTINGS.
 
 - Pin source, recipe, and package tests to mojo-net `v0.2.4`. Release
   0.2.6 named `v0.2.3`, but that git tag still built a 0.2.2 conda
