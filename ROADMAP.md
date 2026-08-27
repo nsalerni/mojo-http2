@@ -18,10 +18,9 @@ is caller-driven on one thread by design; an async adapter would belong in
 the application (or in mojo-net, once Modular ships a public async I/O
 runtime).
 
-Consumers such as grpc-mojo cannot advertise a non-default initial window
-until this package tags a release that includes
-`Http2Connection(initial_window_size=...)`. That wait is on the consumer,
-not on this tree.
+`Http2Connection(initial_window_size=...)` shipped in 0.2.7. Consumers
+such as grpc-mojo can advertise a non-default window once they pin this
+tag.
 
 ## Non-goals
 
