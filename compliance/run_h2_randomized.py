@@ -44,6 +44,10 @@ class StateCase:
     # Used for RFC 9113 rules hyper-h2 implements more strictly than the RFC
     # requires (reserved WINDOW_UPDATE high bit, §6.9).
     rfc_accepts: bool = False
+    # When True, hyper-h2 is expected to accept and Mojo to connection-error.
+    # Used for RFC 9113 rules hyper-h2 implements more loosely than the RFC
+    # requires (DATA after RST_STREAM, §5.1).
+    rfc_rejects: bool = False
 
     def wire(self) -> bytes:
         return b"".join(self.frames)
@@ -139,6 +143,7 @@ def make_state_case(index: int, rng: random.Random) -> StateCase:
     expected_error_code = None
     expected_stream_error_code = None
     rfc_accepts = False
+    rfc_rejects = False
 
     if category == 0:
         identifiers = rng.sample((1, 3, 4, 5, 6, 0xA0), rng.randint(1, 4))
@@ -322,11 +327,15 @@ def make_state_case(index: int, rng: random.Random) -> StateCase:
         )
         check_window = True
     elif category == 34:
+        # DATA after RST_STREAM. RFC 9113 §5.1: a frame other than PRIORITY
+        # after RST_STREAM is a connection error (STREAM_CLOSED). hyper-h2
+        # ignores the DATA and may RST the stream again.
         open_count = 1
         frames = (
             frame(3, 0, 1, (8).to_bytes(4, "big")),
             frame(0, 0x01, 1, rng.randbytes(4)),
         )
+        rfc_rejects = True
     else:
         promised = 2
         block = HpackEncoder().encode(
@@ -351,6 +360,7 @@ def make_state_case(index: int, rng: random.Random) -> StateCase:
         expected_error_code=expected_error_code,
         expected_stream_error_code=expected_stream_error_code,
         rfc_accepts=rfc_accepts,
+        rfc_rejects=rfc_rejects,
     )
 
 
@@ -551,6 +561,15 @@ def state_mismatch(case: StateCase, actual: dict[str, object]) -> str | None:
             return f"hyper-h2 accepted an RFC 9113-valid frame: {expected}"
         if actual.get("status") != "OK":
             return f"Mojo rejected an RFC 9113-valid frame: {actual.get('status')}"
+        return None
+    if case.rfc_rejects:
+        if expected["status"] != "OK":
+            return f"hyper-h2 rejected a frame it is known to accept: {expected}"
+        if actual.get("status") != "ERROR":
+            return f"Mojo accepted a frame RFC 9113 rejects: {actual.get('status')}"
+        mojo_output = cast(tuple[FrameSignature, ...], actual.get("output", ()))
+        if not mojo_output or mojo_output[-1][0] != 7:
+            return f"Mojo did not send GOAWAY for an RFC 9113 connection error: {mojo_output}"
         return None
     if actual.get("status") != expected["status"]:
         return f"status: hyper-h2={expected['status']} mojo={actual.get('status')}"

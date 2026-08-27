@@ -8,7 +8,10 @@
   more gRPC header names, Huffman-unfriendly values, and swap/duplicate
   mutations. Connection-state comparison ignores WINDOW_UPDATE output:
   Mojo replenishes the receive window after DATA, and hyper-h2 does not
-  until the caller acknowledges the bytes.
+  until the caller acknowledges the bytes. OPEN now sends the same
+  request HEADERS plus END_STREAM as hyper-h2. DATA after RST_STREAM is
+  compared against RFC 9113 §5.1 (Mojo connection-errors; hyper-h2
+  ignores the DATA).
 
 ## 0.2.7 - 2026-08-27
 

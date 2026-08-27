@@ -10,8 +10,19 @@
 from std.sys import argv
 
 from h2 import Http2Connection
+from hpack import HeaderField
 from net import IOStream
 from testutil import from_hex, to_hex
+
+
+def request_headers() -> List[HeaderField]:
+    """Returns the same request block the hyper-h2 OPEN path sends."""
+    var fields = List[HeaderField]()
+    fields.append(HeaderField(":method", "GET"))
+    fields.append(HeaderField(":scheme", "https"))
+    fields.append(HeaderField(":path", "/randomized"))
+    fields.append(HeaderField(":authority", "localhost"))
+    return fields^
 
 
 struct RejectingStream(IOStream):
@@ -78,7 +89,9 @@ def main() raises:
             if count < 0 or count > 8:
                 raise Error("invalid OPEN count")
             for _ in range(count):
-                _ = conn.open_stream()
+                var stream_id = conn.open_stream()
+                var headers = request_headers()
+                conn.queue_headers(stream_id, Span(headers), end_stream=True)
             _ = conn.take_pending_output()
             continue
         if stripped.startswith("CHUNK "):

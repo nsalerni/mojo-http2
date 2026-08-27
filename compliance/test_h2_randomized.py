@@ -72,6 +72,44 @@ class RandomizedRunnerTests(unittest.TestCase):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     randomized.parse_args(arguments)
 
+    def test_state_mismatch_rfc_rejects_data_after_rst(self):
+        case = randomized.StateCase(
+            name="rst-data",
+            open_count=1,
+            frames=(randomized.frame(3, 0, 1, b"\x00\x00\x00\x08"),),
+            chunk_sizes=(13,),
+            rfc_rejects=True,
+        )
+        reference = {
+            "status": "OK",
+            "output": ((3, 0, 1, "00000005"),),
+            "settings": {},
+            "send_window": 65535,
+            "goaway_last": None,
+            "goaway_code": None,
+        }
+        with patch.object(randomized, "reference_state", return_value=reference):
+            reason = randomized.state_mismatch(
+                case,
+                {
+                    **reference,
+                    "status": "ERROR",
+                    "output": ((7, 0, 0, "0000000000000005"),),
+                },
+            )
+        self.assertIsNone(reason)
+
+        with patch.object(randomized, "reference_state", return_value=reference):
+            reason = randomized.state_mismatch(
+                case,
+                {
+                    **reference,
+                    "status": "OK",
+                },
+            )
+        self.assertIsNotNone(reason)
+        self.assertIn("RFC 9113 rejects", reason)
+
     def test_state_mismatch_ignores_window_update_acks(self):
         case = randomized.StateCase(
             name="data",
