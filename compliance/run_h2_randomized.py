@@ -281,10 +281,16 @@ def make_state_case(index: int, rng: random.Random) -> StateCase:
         frames = (frame(8, 0, 0, payload),)
         rfc_accepts = True
     elif category == 29:
+        # Padded DATA after response HEADERS. DATA before HEADERS is rejected
+        # by hyper-h2 even though the stream is half-closed (local).
         open_count = 1
         pad = rng.randint(0, 7)
         payload = bytes((pad,)) + rng.randbytes(rng.randint(1, 8)) + bytes(pad)
-        frames = (frame(0, 0x08, 1, payload),)
+        headers = HpackEncoder().encode([(":status", "200")])
+        frames = (
+            frame(1, 0x04, 1, headers),
+            frame(0, 0x09, 1, payload),
+        )
     elif category == 30:
         open_count = 1
         block = HpackEncoder().encode(
