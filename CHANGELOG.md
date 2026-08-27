@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.7 - 2026-08-27
+
 - `Http2Connection` accepts `initial_window_size` to advertise
   SETTINGS_INITIAL_WINDOW_SIZE and size new stream receive windows. Values
   above the 65,535 RFC default also send a connection-level WINDOW_UPDATE
@@ -16,7 +18,6 @@
   Blocking `process_next_frame` also flushes that startup output before
   reading the first peer frame, so a queue that fits SETTINGS plus
   WINDOW_UPDATE still has room to acknowledge peer SETTINGS.
-
 - Pin source, recipe, and package tests to mojo-net `v0.2.4`. Release
   0.2.6 named `v0.2.3`, but that git tag still built a 0.2.2 conda
   package. The recipe lower bound is now `>=0.2.4` so `write_some` is
