@@ -40,14 +40,15 @@ struct H2TLSContext(Movable):
 
     @staticmethod
     def client(
-        *, verify: Bool = True, ca_file: String = ""
+        *, verify: Bool = True, ca_file: StringSpan = ""
     ) raises -> H2TLSContext:
         """Builds a client context that offers only the `h2` ALPN token.
 
         Args:
             verify: Verify the server certificate chain and hostname.
                 Disable only in controlled tests.
-            ca_file: PEM trust bundle; empty uses the system trust store.
+            ca_file: Path to a PEM trust bundle; empty uses the system
+                trust store.
 
         Returns:
             A reusable client-side HTTP/2 TLS context.
@@ -57,13 +58,15 @@ struct H2TLSContext(Movable):
         """
         return H2TLSContext(
             _tls=TLSContext.client(
-                verify=verify, ca_file=ca_file, alpn=[String(H2_ALPN)]
+                verify=verify, ca_file=String(ca_file), alpn=[String(H2_ALPN)]
             ),
             _is_server=False,
         )
 
     @staticmethod
-    def server(cert_chain_pem: String, key_pem: String) raises -> H2TLSContext:
+    def server(
+        cert_chain_pem: StringSpan, key_pem: StringSpan
+    ) raises -> H2TLSContext:
         """Builds a server context that accepts only the `h2` token.
 
         Args:
@@ -78,7 +81,7 @@ struct H2TLSContext(Movable):
         """
         return H2TLSContext(
             _tls=TLSContext.server(
-                cert_chain_pem, key_pem, alpn=[String(H2_ALPN)]
+                String(cert_chain_pem), String(key_pem), alpn=[String(H2_ALPN)]
             ),
             _is_server=True,
         )
