@@ -10,6 +10,9 @@
   window is 65,535. Preface SETTINGS and a companion connection
   WINDOW_UPDATE are reserved as one unit so a queue-limit failure cannot
   advertise a larger stream window without raising the session window.
+  Servers reserve that startup output before accepting any client preface
+  byte, including the blocking `process_next_frame` path, so a short
+  first chunk cannot consume bytes that a later retry cannot reconstruct.
 
 - Pin source, recipe, and package tests to mojo-net `v0.2.4`. Release
   0.2.6 named `v0.2.3`, but that git tag still built a 0.2.2 conda

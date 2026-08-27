@@ -1132,13 +1132,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         var preface_len = StaticString(CONNECTION_PREFACE).byte_length()
         if self._preface_received < preface_len:
             var remaining = preface_len - self._preface_received
-            var required_output = (
-                self._initial_settings_output_size()
-                if len(data) >= remaining
-                else FRAME_HEADER_LEN + 8
-            )
-            # Reserve before consuming bytes so a retry can use the same span.
-            self._ensure_output_capacity(required_output)
+            # Reserve the full SETTINGS (and companion WINDOW_UPDATE) before
+            # accepting any preface byte. A smaller fallback would let a
+            # short first chunk commit bytes that a later retry cannot
+            # reconstruct once capacity is raised.
+            self._ensure_output_capacity(self._initial_settings_output_size())
             var expected = StaticString(CONNECTION_PREFACE).as_bytes()
             var take = min(remaining, len(data))
             for i in range(take):
@@ -1190,7 +1188,14 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             afterwards.
         """
         self.flush_output()
-        self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
+        var needed = 2 * (FRAME_HEADER_LEN + 4)
+        if not self.input_preface_complete():
+            # Startup SETTINGS can exceed the generic ACK bound. Reserve
+            # that output before read_exact consumes the transport preface.
+            var startup = self._initial_settings_output_size()
+            if startup > needed:
+                needed = startup
+        self._ensure_output_capacity(needed)
         try:
             if not self.input_preface_complete():
                 var preface = self.stream.read_exact(

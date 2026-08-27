@@ -270,6 +270,47 @@ def test_large_window_startup_is_atomic() raises:
         "retried WINDOW_UPDATE raises the session window",
     )
 
+    # A one-byte preface chunk must fail the same reserve, not commit a
+    # byte that makes a later full-preface retry look malformed.
+    var split = Http2Connection(
+        RejectingStream(), is_client=False, initial_window_size=1048576
+    )
+    split.max_pending_output_size = 39
+    raised = False
+    try:
+        _ = split.feed_input(Span(preface)[0:1])
+    except error:
+        raised = True
+        assert_true("outbound frame queue" in String(error), String(error))
+    assert_true(raised, "partial preface still requires full startup output")
+    assert_equal(split.pending_output_len(), 0)
+    assert_false(split.input_preface_complete())
+    split.max_pending_output_size = 1024
+    _ = split.feed_input(Span(preface))
+    assert_true(split.input_preface_complete())
+    assert_equal(split.recv_window, 1048576)
+
+    # Blocking startup must not read_exact the preface when SETTINGS and
+    # WINDOW_UPDATE cannot both fit. RejectingStream raises if it is read.
+    var blocking = Http2Connection(
+        RejectingStream(), is_client=False, initial_window_size=1048576
+    )
+    blocking.max_pending_output_size = 39
+    raised = False
+    try:
+        blocking.process_next_frame()
+    except error:
+        raised = True
+        var message = String(error)
+        assert_true("outbound frame queue" in message, message)
+        assert_true("must not be read" not in message, message)
+    assert_true(raised, "blocking startup reserves before reading")
+    assert_false(blocking.input_preface_complete())
+    assert_equal(blocking.pending_output_len(), 0)
+    blocking.max_pending_output_size = 1024
+    _ = blocking.feed_input(Span(preface))
+    assert_true(blocking.input_preface_complete())
+
 
 def test_enable_push_obeys_endpoint_roles() raises:
     for value in [UInt32(0), UInt32(1), UInt32(2)]:
