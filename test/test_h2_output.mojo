@@ -219,8 +219,9 @@ def test_configurable_initial_window() raises:
         "SETTINGS carries INITIAL_WINDOW_SIZE=1048576",
     )
     # WINDOW_UPDATE increment is 1048576 - 65535 = 983041 = 0x000F0001.
+    # 9-byte header (length=4, type=WINDOW_UPDATE, stream 0) plus increment.
     assert_true(
-        "0000040800000000000f0001" in large_hex,
+        "000004080000000000000f0001" in large_hex,
         "connection WINDOW_UPDATE raises the session window",
     )
 
