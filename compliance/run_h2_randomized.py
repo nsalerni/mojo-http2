@@ -18,6 +18,7 @@ import h2.config
 import h2.connection
 import h2.events
 import h2.exceptions
+from hpack.hpack import Encoder as HpackEncoder
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,6 +40,14 @@ class StateCase:
     # a different error code or escalates a stream error to the connection.
     expected_error_code: int | None = None
     expected_stream_error_code: int | None = None
+    # When True, hyper-h2 is expected to connection-error and Mojo to accept.
+    # Used for RFC 9113 rules hyper-h2 implements more strictly than the RFC
+    # requires (reserved WINDOW_UPDATE high bit, §6.9).
+    rfc_accepts: bool = False
+    # When True, hyper-h2 is expected to accept and Mojo to connection-error.
+    # Used for RFC 9113 rules hyper-h2 implements more loosely than the RFC
+    # requires (DATA after RST_STREAM, §5.1).
+    rfc_rejects: bool = False
 
     def wire(self) -> bytes:
         return b"".join(self.frames)
@@ -126,13 +135,15 @@ def chunks_for_frames(frames: tuple[bytes, ...], rng: random.Random) -> tuple[in
 
 
 def make_state_case(index: int, rng: random.Random) -> StateCase:
-    category = index % 24
+    category = index % 36
     open_count = 0
     changed_settings: tuple[int, ...] = ()
     check_window = False
     check_goaway = False
     expected_error_code = None
     expected_stream_error_code = None
+    rfc_accepts = False
+    rfc_rejects = False
 
     if category == 0:
         identifiers = rng.sample((1, 3, 4, 5, 6, 0xA0), rng.randint(1, 4))
@@ -246,12 +257,97 @@ def make_state_case(index: int, rng: random.Random) -> StateCase:
         frames = (settings, ping, update)
         changed_settings = (1,)
         check_window = True
-    else:
+    elif category == 23:
         payload = setting(3, rng.randrange(0, 1025))
         settings = frame(4, 0x80, 0, payload, reserved_stream_bit=True)
         ping = frame(6, 0x80, 0, rng.randbytes(8), reserved_stream_bit=True)
         frames = (settings, ping)
         changed_settings = (3,)
+    elif category == 24:
+        frames = (frame(0, 0, 0, rng.randbytes(rng.randint(1, 8))),)
+        expected_error_code = 1
+    elif category == 25:
+        frames = (frame(1, 0x04, 0, rng.randbytes(rng.randint(1, 8))),)
+        expected_error_code = 1
+    elif category == 26:
+        frames = (frame(9, 0x04, rng.choice((1, 3)), rng.randbytes(rng.randint(1, 8))),)
+        expected_error_code = 1
+    elif category == 27:
+        open_count = 1
+        dependency = rng.choice((0, 3, 5))
+        payload = dependency.to_bytes(4, "big") + bytes((rng.randrange(256),))
+        frames = (frame(2, rng.choice((0, 0x80)), 1, payload),)
+    elif category == 28:
+        # WINDOW_UPDATE with reserved high bit set. RFC 9113 §6.9: receivers
+        # MUST ignore the reserved bit. hyper-h2 treats increment > 2^31-1 as
+        # a connection error (PROTOCOL_ERROR / FLOW_CONTROL_ERROR).
+        increment = rng.randrange(1, 1 << 20)
+        payload = (increment | 0x80000000).to_bytes(4, "big")
+        frames = (frame(8, 0, 0, payload),)
+        rfc_accepts = True
+    elif category == 29:
+        # Padded DATA after response HEADERS. DATA before HEADERS is rejected
+        # by hyper-h2 even though the stream is half-closed (local).
+        open_count = 1
+        pad = rng.randint(0, 7)
+        payload = bytes((pad,)) + rng.randbytes(rng.randint(1, 8)) + bytes(pad)
+        headers = HpackEncoder().encode([(":status", "200")])
+        frames = (
+            frame(1, 0x04, 1, headers),
+            frame(0, 0x09, 1, payload),
+        )
+    elif category == 30:
+        open_count = 1
+        block = HpackEncoder().encode(
+            [(":status", "200"), ("content-type", "application/grpc")]
+        )
+        if len(block) < 2:
+            frames = (frame(1, 0x04, 1, block),)
+        else:
+            split = rng.randint(1, len(block) - 1)
+            frames = (
+                frame(1, 0, 1, block[:split]),
+                frame(9, 0x04, 1, block[split:]),
+            )
+    elif category == 31:
+        frames = (
+            frame(0x0B, rng.randrange(256), 0, rng.randbytes(rng.randint(0, 8))),
+        )
+    elif category == 32:
+        first = rng.randrange(0, 1 << 16)
+        second = rng.randrange(0, 1 << 16)
+        frames = (frame(4, 0, 0, setting(1, first) + setting(1, second)),)
+        changed_settings = (1,)
+    elif category == 33:
+        first = rng.randrange(1, 1 << 16)
+        second = rng.randrange(1, 1 << 16)
+        frames = (
+            frame(8, 0, 0, first.to_bytes(4, "big")),
+            frame(8, 0, 0, second.to_bytes(4, "big")),
+        )
+        check_window = True
+    elif category == 34:
+        # DATA after RST_STREAM. RFC 9113 §5.1: a frame other than PRIORITY
+        # after RST_STREAM is a connection error (STREAM_CLOSED). hyper-h2
+        # ignores the DATA and may RST the stream again.
+        open_count = 1
+        frames = (
+            frame(3, 0, 1, (8).to_bytes(4, "big")),
+            frame(0, 0x01, 1, rng.randbytes(4)),
+        )
+        rfc_rejects = True
+    else:
+        promised = 2
+        block = HpackEncoder().encode(
+            [
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":path", "/push"),
+                (":authority", "localhost"),
+            ]
+        )
+        frames = (frame(5, 0x04, 1, promised.to_bytes(4, "big") + block),)
+        expected_error_code = 1
 
     return StateCase(
         name=f"state-{index}-{category}",
@@ -263,6 +359,8 @@ def make_state_case(index: int, rng: random.Random) -> StateCase:
         check_goaway=check_goaway,
         expected_error_code=expected_error_code,
         expected_stream_error_code=expected_stream_error_code,
+        rfc_accepts=rfc_accepts,
+        rfc_rejects=rfc_rejects,
     )
 
 
@@ -298,6 +396,19 @@ def output_signatures(data: bytes) -> tuple[tuple[int, int, int, str], ...]:
         signatures.append((frame_type, flags, stream_id, payload.hex()))
         offset = end
     return tuple(signatures)
+
+
+def without_window_updates(
+    frames: object,
+) -> tuple[FrameSignature, ...]:
+    """Drops WINDOW_UPDATE frames from a compared output sequence.
+
+    RFC 9113 §6.9 lets a receiver replenish flow-control credit when it
+    chooses. Mojo queues a connection WINDOW_UPDATE from `_replenish`
+    after DATA; hyper-h2 does not until `acknowledge_received_data`.
+    """
+    signatures = cast(tuple[FrameSignature, ...], frames)
+    return tuple(member for member in signatures if member[0] != 8)
 
 
 def reference_state(case: StateCase) -> dict[str, object]:
@@ -445,6 +556,21 @@ def state_mismatch(case: StateCase, actual: dict[str, object]) -> str | None:
                 f"mojo={code}"
             )
         return None
+    if case.rfc_accepts:
+        if expected["status"] != "ERROR":
+            return f"hyper-h2 accepted an RFC 9113-valid frame: {expected}"
+        if actual.get("status") != "OK":
+            return f"Mojo rejected an RFC 9113-valid frame: {actual.get('status')}"
+        return None
+    if case.rfc_rejects:
+        if expected["status"] != "OK":
+            return f"hyper-h2 rejected a frame it is known to accept: {expected}"
+        if actual.get("status") != "ERROR":
+            return f"Mojo accepted a frame RFC 9113 rejects: {actual.get('status')}"
+        mojo_output = cast(tuple[FrameSignature, ...], actual.get("output", ()))
+        if not mojo_output or mojo_output[-1][0] != 7:
+            return f"Mojo did not send GOAWAY for an RFC 9113 connection error: {mojo_output}"
+        return None
     if actual.get("status") != expected["status"]:
         return f"status: hyper-h2={expected['status']} mojo={actual.get('status')}"
     if expected["status"] == "ERROR":
@@ -463,7 +589,9 @@ def state_mismatch(case: StateCase, actual: dict[str, object]) -> str | None:
                     f"mojo={code}"
                 )
         return None
-    if actual.get("output") != expected["output"]:
+    if without_window_updates(actual.get("output", ())) != without_window_updates(
+        expected["output"]
+    ):
         return f"output: hyper-h2={expected['output']} mojo={actual.get('output')}"
     expected_settings = cast(dict[int, int], expected["settings"])
     actual_settings = cast(dict[int, int], actual.get("settings", {}))
