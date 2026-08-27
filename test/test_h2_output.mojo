@@ -236,6 +236,41 @@ def test_configurable_initial_window() raises:
     assert_true(raised, "window above 2^31-1 is rejected")
 
 
+def test_large_window_startup_is_atomic() raises:
+    var preface = from_hex(
+        "505249202a20485454502f322e300d0a0d0a534d0d0a0d0a"
+    )
+    var server = Http2Connection(
+        RejectingStream(), is_client=False, initial_window_size=1048576
+    )
+    # SETTINGS is 27 bytes; WINDOW_UPDATE is 13. 39 fits SETTINGS only.
+    server.max_pending_output_size = 39
+    var raised = False
+    try:
+        _ = server.feed_input(Span(preface))
+    except error:
+        raised = True
+        assert_true("outbound frame queue" in String(error), String(error))
+    assert_true(raised, "queue bound below SETTINGS+WINDOW_UPDATE is rejected")
+    assert_equal(server.pending_output_len(), 0, "no partial SETTINGS")
+    assert_equal(server.recv_window, 65535, "recv_window unchanged")
+    assert_false(server.input_preface_complete(), "preface not consumed")
+
+    server.max_pending_output_size = 1024
+    _ = server.feed_input(Span(preface))
+    assert_true(server.input_preface_complete())
+    assert_equal(server.recv_window, 1048576)
+    var out = server.take_pending_output()
+    var out_hex = to_hex(Span(out))
+    assert_true(
+        "000400100000" in out_hex, "retried SETTINGS carries the window"
+    )
+    assert_true(
+        "000004080000000000000f0001" in out_hex,
+        "retried WINDOW_UPDATE raises the session window",
+    )
+
+
 def test_enable_push_obeys_endpoint_roles() raises:
     for value in [UInt32(0), UInt32(1), UInt32(2)]:
         var client = make_client()
@@ -727,6 +762,7 @@ def main() raises:
     test_incremental_startup_and_every_split_point()
     test_client_startup_is_queued_without_writes()
     test_configurable_initial_window()
+    test_large_window_startup_is_atomic()
     test_enable_push_obeys_endpoint_roles()
     test_incremental_connection_error_is_terminal()
     test_incremental_dispatch_budget_resumes_in_order()

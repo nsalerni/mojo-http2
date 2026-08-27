@@ -7,7 +7,9 @@
   above the 65,535 RFC default also send a connection-level WINDOW_UPDATE
   so the larger stream budget is not capped by the session window. The
   default constructor is unchanged: the identifier is omitted when the
-  window is 65,535.
+  window is 65,535. Preface SETTINGS and a companion connection
+  WINDOW_UPDATE are reserved as one unit so a queue-limit failure cannot
+  advertise a larger stream window without raising the session window.
 
 - Pin source, recipe, and package tests to mojo-net `v0.2.4`. Release
   0.2.6 named `v0.2.3`, but that git tag still built a 0.2.2 conda

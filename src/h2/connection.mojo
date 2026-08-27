@@ -333,14 +333,38 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self.our_settings.enable_push = False
             self._ensure_output_capacity(
                 StaticString(CONNECTION_PREFACE).byte_length()
+                + self._initial_settings_output_size()
             )
             self._pending_output.extend(
                 StaticString(CONNECTION_PREFACE).as_bytes()
             )
             self._queue_initial_settings()
 
+    def _initial_settings_output_size(self) -> Int:
+        """Bytes for the preface SETTINGS frame and any companion WINDOW_UPDATE.
+
+        Server SETTINGS is 12 payload bytes (MAX_CONCURRENT_STREAMS and
+        MAX_HEADER_LIST_SIZE). Clients add ENABLE_PUSH. A non-default
+        INITIAL_WINDOW_SIZE adds 6 more, and a larger-than-default window
+        also sends a 4-byte connection WINDOW_UPDATE.
+        """
+        var payload = 12
+        if self.is_client:
+            payload += 6
+        if self.our_settings.initial_window_size != DEFAULT_WINDOW_SIZE:
+            payload += 6
+        var total = FRAME_HEADER_LEN + payload
+        if Int(self.our_settings.initial_window_size) > DEFAULT_WINDOW_SIZE:
+            total += FRAME_HEADER_LEN + 4
+        return total
+
     def _queue_initial_settings(mut self) raises:
-        """Queues the local connection preface SETTINGS frame."""
+        """Queues the local connection preface SETTINGS frame.
+
+        SETTINGS and a companion connection WINDOW_UPDATE are reserved as
+        one unit so a queue-limit failure cannot advertise a larger stream
+        window without raising the session window.
+        """
         var our = List[Byte]()
         if self.is_client:
             # This implementation does not expose server push, so clients
@@ -356,8 +380,9 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         if self.our_settings.initial_window_size != DEFAULT_WINDOW_SIZE:
             put_u16_be(our, SETTINGS_INITIAL_WINDOW_SIZE)
             put_u32_be(our, self.our_settings.initial_window_size)
-        self._queue_frame(FRAME_SETTINGS, 0, 0, our^)
         var advertised = Int(self.our_settings.initial_window_size)
+        self._ensure_output_capacity(self._initial_settings_output_size())
+        self._queue_frame_unchecked(FRAME_SETTINGS, 0, 0, our^)
         if advertised > DEFAULT_WINDOW_SIZE:
             # SETTINGS_INITIAL_WINDOW_SIZE is stream-level only. Raise the
             # connection window with WINDOW_UPDATE so the larger stream
@@ -366,7 +391,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self.recv_window = advertised
             var inc = List[Byte](capacity=4)
             put_u32_be(inc, UInt32(delta))
-            self._queue_frame(FRAME_WINDOW_UPDATE, 0, 0, inc)
+            self._queue_frame_unchecked(FRAME_WINDOW_UPDATE, 0, 0, inc)
 
     # --- low-level frame I/O ---
 
@@ -1108,7 +1133,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         if self._preface_received < preface_len:
             var remaining = preface_len - self._preface_received
             var required_output = (
-                FRAME_HEADER_LEN + 12
+                self._initial_settings_output_size()
                 if len(data) >= remaining
                 else FRAME_HEADER_LEN + 8
             )
