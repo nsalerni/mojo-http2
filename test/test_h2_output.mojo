@@ -239,6 +239,46 @@ def test_client_startup_is_queued_without_writes() raises:
     assert_false(client.our_settings.enable_push, "client disables push")
 
 
+def test_configurable_connection_limits() raises:
+    var custom = Http2Connection(
+        RejectingStream(),
+        is_client=True,
+        max_concurrent_streams=2,
+        max_header_list_size=4096,
+        max_header_block_size=8192,
+        max_header_continuations=4,
+        max_pending_output_size=64 * 1024,
+    )
+    assert_equal(custom.max_concurrent_streams, 2)
+    assert_equal(custom.max_header_list_size, 4096)
+    assert_equal(custom.max_header_block_size, 8192)
+    assert_equal(custom.max_header_continuations, 4)
+    assert_equal(custom.max_pending_output_size, 64 * 1024)
+    var out = to_hex(Span(custom.take_pending_output()))
+    assert_true("000300000002" in out, "SETTINGS carries MAX_CONCURRENT_STREAMS=2")
+    assert_true("000600001000" in out, "SETTINGS carries MAX_HEADER_LIST_SIZE=4096")
+
+    var raised = False
+    try:
+        _ = Http2Connection(
+            RejectingStream(), is_client=True, max_pending_output_size=25
+        )
+    except error:
+        raised = True
+        assert_true("max_pending_output_size" in String(error), String(error))
+    assert_true(raised, "output queue below 26 is rejected")
+
+    raised = False
+    try:
+        _ = Http2Connection(
+            RejectingStream(), is_client=True, max_concurrent_streams=0
+        )
+    except error:
+        raised = True
+        assert_true("max_concurrent_streams" in String(error), String(error))
+    assert_true(raised, "zero concurrent streams is rejected")
+
+
 def test_configurable_initial_window() raises:
     var small = Http2Connection(
         RejectingStream(), is_client=True, initial_window_size=1024
@@ -889,6 +929,7 @@ def test_keepalive_ping_is_caller_driven() raises:
 def main() raises:
     test_incremental_startup_and_every_split_point()
     test_client_startup_is_queued_without_writes()
+    test_configurable_connection_limits()
     test_configurable_initial_window()
     test_large_window_startup_is_atomic()
     test_enable_push_obeys_endpoint_roles()

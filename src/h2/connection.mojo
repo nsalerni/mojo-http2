@@ -258,6 +258,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         *,
         is_client: Bool,
         initial_window_size: UInt32 = DEFAULT_WINDOW_SIZE,
+        max_concurrent_streams: Int = 256,
+        max_header_list_size: Int = 16384,
+        max_header_block_size: Int = 65536,
+        max_header_continuations: Int = 1024,
+        max_pending_output_size: Int = 1048576,
     ) raises:
         """Initializes the connection without transport reads or writes.
 
@@ -279,13 +284,35 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 server.
             initial_window_size: Per-stream receive window advertised to
                 the peer. Must not exceed 2^31 - 1.
+            max_concurrent_streams: Advertised limit on concurrent
+                peer-initiated streams. Must be at least 1.
+            max_header_list_size: Limit on the uncompressed size of a
+                received header list, advertised in SETTINGS. Must be at
+                least 1.
+            max_header_block_size: Limit on compressed bytes retained
+                across a header block. Must be at least 1.
+            max_header_continuations: Limit on CONTINUATION frames in one
+                header block. Must be at least 1.
+            max_pending_output_size: Maximum outbound bytes retained.
+                Must be at least 26 so a SETTINGS ACK and PING ACK can
+                both fit.
 
         Raises:
-            If `initial_window_size` is too large, the latency hint cannot
-            be applied, or startup output cannot fit in the default queue.
+            If a limit is out of range, the latency hint cannot be
+            applied, or startup output cannot fit in the output queue.
         """
         if initial_window_size > 0x7FFFFFFF:
             raise Error("h2: INITIAL_WINDOW_SIZE too large")
+        if max_concurrent_streams < 1:
+            raise Error("h2: max_concurrent_streams must be at least 1")
+        if max_header_list_size < 1:
+            raise Error("h2: max_header_list_size must be at least 1")
+        if max_header_block_size < 1:
+            raise Error("h2: max_header_block_size must be at least 1")
+        if max_header_continuations < 1:
+            raise Error("h2: max_header_continuations must be at least 1")
+        if max_pending_output_size < 26:
+            raise Error("h2: max_pending_output_size must be at least 26")
         self.stream = stream^
         self.is_client = is_client
         self.hpack_enc = HpackEncoder()
@@ -307,11 +334,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.validate_requests = not is_client
         self.rst_received = 0
         self.control_frames = 0
-        self.max_concurrent_streams = 256
-        self.max_header_list_size = 16384
-        self.max_header_block_size = 65536
-        self.max_header_continuations = 1024
-        self.max_pending_output_size = 1048576
+        self.max_concurrent_streams = max_concurrent_streams
+        self.max_header_list_size = max_header_list_size
+        self.max_header_block_size = max_header_block_size
+        self.max_header_continuations = max_header_continuations
+        self.max_pending_output_size = max_pending_output_size
         self._pending_output = List[Byte]()
         self._pending_header_stream = 0
         self._pending_header_flags = 0

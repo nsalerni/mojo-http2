@@ -8,6 +8,10 @@
   and `Http2Connection.queue_headers` emit never-indexed literals for those
   fields. Equality still compares only name and value; the decoder does not
   reconstruct the hint.
+- `Http2Connection` accepts `max_concurrent_streams`, `max_header_list_size`,
+  `max_header_block_size`, `max_header_continuations`, and
+  `max_pending_output_size` with the previous hardcoded defaults. Invalid
+  values raise at construction.
 - `H2TLSContext.client` and `server` take `StringSpan` for CA, certificate,
   and key filesystem paths. Values are copied to `String` before calling
   mojo-tls.
