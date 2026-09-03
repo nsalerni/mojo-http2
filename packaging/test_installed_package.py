@@ -96,7 +96,7 @@ def main() -> None:
             PACKAGE_BUILD_TIMEOUT_SECONDS,
         )
         net_package = one_package(
-            net_output, "mojo-net-0.2.4-*.conda", "mojo-net 0.2.4"
+            net_output, "mojo-net-0.2.6-*.conda", "mojo-net 0.2.6"
         )
         shutil.copy2(net_package, channel_subdir / net_package.name)
         index_channel(channel)
@@ -118,7 +118,7 @@ def main() -> None:
         add_channels(tls_command, channel)
         run(tls_command, PACKAGE_BUILD_TIMEOUT_SECONDS)
         tls_package = one_package(
-            tls_output, "mojo-tls-0.3.0-*.conda", "mojo-tls 0.3.0"
+            tls_output, "mojo-tls-0.3.2-*.conda", "mojo-tls 0.3.2"
         )
         shutil.copy2(tls_package, channel_subdir / tls_package.name)
         index_channel(channel)

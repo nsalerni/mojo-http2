@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Pin source, recipe, and package tests to mojo-net 0.2.6 and mojo-tls
+  0.3.2. Until those tags exist, `deps.json` tracks the stacked release
+  branches.
+
 ## 0.2.8 - 2026-09-03
 
 - `HeaderField` carries an optional `sensitive` encoding hint. `Encoder.encode`
