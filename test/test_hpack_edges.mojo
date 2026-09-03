@@ -63,6 +63,23 @@ def test_sensitive_unknown_name() raises:
     assert_true(back[0] == field, "sensitive literal-name round trip")
 
 
+def test_encode_honors_field_sensitive() raises:
+    var e = Encoder()
+    var fields = List[HeaderField]()
+    fields.append(
+        HeaderField(name=String("password"), value=String("secret"), sensitive=True)
+    )
+    var out = List[Byte]()
+    e.encode(Span(fields), out)
+    assert_equal(Int(out[0]), 0x10)
+    assert_equal(e.table.size, 0, "sensitive encode must not insert")
+    var d = Decoder()
+    var back = d.decode(Span(out))
+    assert_equal(len(back), 1)
+    assert_true(back[0] == hf("password", "secret"))
+    assert_false(back[0].sensitive, "decoder does not reconstruct the hint")
+
+
 def test_sensitive_ignores_dynamic_name_match() raises:
     # Only static name indices may be used for sensitive fields: a name
     # that matches a dynamic-table entry is still emitted literally.
@@ -357,6 +374,11 @@ def test_header_field_basics() raises:
     assert_true(hf("a", "b") == hf("a", "b"), "equal fields")
     assert_false(hf("a", "b") == hf("x", "b"), "name differs")
     assert_false(hf("a", "b") == hf("a", "x"), "value differs")
+    assert_true(
+        HeaderField(name=String("a"), value=String("b"), sensitive=True)
+        == hf("a", "b"),
+        "sensitive is not part of equality",
+    )
 
     var s = String()
     s.write(hf("content-type", "text/plain"))
@@ -366,6 +388,7 @@ def test_header_field_basics() raises:
 def main() raises:
     test_sensitive_static_name()
     test_sensitive_unknown_name()
+    test_encode_honors_field_sensitive()
     test_sensitive_ignores_dynamic_name_match()
     test_huffman_eos_in_string()
     test_huffman_padding_too_long()

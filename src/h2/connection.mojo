@@ -641,7 +641,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         """Queues a header block as HEADERS plus CONTINUATION as needed.
 
         The block is HPACK-encoded and split into chunks no larger than the
-        peer's SETTINGS_MAX_FRAME_SIZE. No transport I/O is performed.
+        peer's SETTINGS_MAX_FRAME_SIZE. Fields with `sensitive=True` are
+        emitted as never-indexed literals. No transport I/O is performed.
 
         Args:
             stream_id: The stream to send on.

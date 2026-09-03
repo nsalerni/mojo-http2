@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.8 - 2026-09-03
+
+- `HeaderField` carries an optional `sensitive` encoding hint. `Encoder.encode`
+  and `Http2Connection.queue_headers` emit never-indexed literals for those
+  fields. Equality still compares only name and value; the decoder does not
+  reconstruct the hint.
 - `H2TLSContext.client` and `server` take `StringSpan` for CA, certificate,
   and key filesystem paths. Values are copied to `String` before calling
   mojo-tls.

@@ -28,6 +28,9 @@ struct RejectingStream(IOStream):
     def set_read_timeout(self, nanos: Int64) raises:
         _ = nanos
 
+    def set_write_timeout(self, nanos: Int64) raises:
+        _ = nanos
+
     def set_nodelay(self, enabled: Bool) raises:
         _ = enabled
 
