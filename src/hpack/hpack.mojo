@@ -23,18 +23,36 @@ from .huffman import HuffmanTree, huffman_encode, huffman_encoded_len
 from .tables import STATIC_NAMES, STATIC_TABLE_SIZE, STATIC_VALUES
 
 
-@fieldwise_init
 struct HeaderField(Copyable, Equatable, Movable, Writable):
     """A single HTTP header as an HPACK name/value pair.
 
     Names are kept exactly as decoded; HTTP/2 requires field names to be
     lowercase on the wire, but this type does not normalize case itself.
+    `sensitive` is an encoding hint: it is not part of field equality and
+    is not reconstructed by the decoder.
     """
 
     var name: String
     """Header field name (for example `:method` or `content-type`)."""
     var value: String
     """Header field value."""
+    var sensitive: Bool
+    """True to emit a never-indexed literal (RFC 7541 §6.2.3)."""
+
+    def __init__(
+        out self, var name: String, var value: String, *, sensitive: Bool = False
+    ):
+        """Constructs a header field.
+
+        Args:
+            name: Header field name.
+            value: Header field value.
+            sensitive: True to force the never-indexed representation when
+                this field is encoded.
+        """
+        self.name = name^
+        self.value = value^
+        self.sensitive = sensitive
 
     def size(self) -> Int:
         """Computes the table entry size of this field.
@@ -506,8 +524,10 @@ struct Encoder(Movable):
     def encode(mut self, fields: Span[HeaderField, _], mut out_buf: List[Byte]):
         """Appends the encoding of a whole header list to a buffer.
 
-        Equivalent to calling `encode_field` on each field in order with
-        `sensitive=False`.
+        Equivalent to calling `encode_field` on each field in order,
+        honoring `HeaderField.sensitive`. An empty list still emits a
+        pending dynamic-table size update so a SETTINGS_HEADER_TABLE_SIZE
+        change is acknowledged with no fields.
 
         Args:
             fields: The header fields to encode, in wire order.
@@ -515,4 +535,4 @@ struct Encoder(Movable):
         """
         self._flush_table_size_update(out_buf)
         for f in fields:
-            self.encode_field(f, out_buf)
+            self.encode_field(f, out_buf, sensitive=f.sensitive)
