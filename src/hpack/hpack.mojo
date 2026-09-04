@@ -525,11 +525,14 @@ struct Encoder(Movable):
         """Appends the encoding of a whole header list to a buffer.
 
         Equivalent to calling `encode_field` on each field in order,
-        honoring `HeaderField.sensitive`.
+        honoring `HeaderField.sensitive`. An empty list still emits a
+        pending dynamic-table size update so a SETTINGS_HEADER_TABLE_SIZE
+        change is acknowledged with no fields.
 
         Args:
             fields: The header fields to encode, in wire order.
             out_buf: Buffer the header block is appended to.
         """
+        self._flush_table_size_update(out_buf)
         for f in fields:
             self.encode_field(f, out_buf, sensitive=f.sensitive)
