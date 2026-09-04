@@ -320,6 +320,17 @@ def test_encoder_table_size_update() raises:
         assert_equal(got[i], expected[i])
 
 
+def test_empty_encode_flushes_table_size() raises:
+    var e = Encoder()
+    e.set_max_size(256)
+    var out = List[Byte]()
+    var empty = List[HeaderField]()
+    e.encode(Span(empty), out)
+    assert_equal(e.pending_table_size, -1)
+    assert_equal(e.pending_min_table_size, -1)
+    assert_true(len(out) > 0, "empty block still emits the size update")
+
+
 def main() raises:
     test_integer_coding()
     test_c2_literals()
@@ -331,4 +342,5 @@ def main() raises:
     test_roundtrip_binary_values()
     test_invalid_inputs()
     test_encoder_table_size_update()
+    test_empty_encode_flushes_table_size()
     print("test_hpack: all tests passed")
