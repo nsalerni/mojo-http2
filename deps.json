@@ -2,10 +2,10 @@
   "dir": ".deps",
   "deps": {
     "mojo-net": {
-      "ref": "cursor/wakeup-pipe-21d9"
+      "ref": "v0.2.6"
     },
     "mojo-tls": {
-      "ref": "cursor/tls-write-timeout-21d9"
+      "ref": "v0.3.2"
     }
   }
 }
