@@ -16,3 +16,14 @@ Application request limits still belong in the caller.
 
 The project has not had an independent security review. See
 [ROADMAP.md](ROADMAP.md) for supported behavior and non-goals.
+
+## Residual risks
+
+- `SETTINGS_TIMEOUT` is defined as an error code but is not armed. The
+  connection is caller-driven and has no timer; a peer that never ACKs
+  SETTINGS must be torn down by the application.
+- Header values are `String` (UTF-8). Arbitrary octet values are out of
+  scope; gRPC `-bin` metadata is base64 at a higher layer.
+- Application request-rate limits still belong in the caller. The
+  connection layer bounds rapid reset, control-frame floods, header size,
+  and queued output.
