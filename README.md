@@ -17,7 +17,33 @@ Two modules version together: **hpack** (standard library only) and **h2**
 ## Install
 
 ```sh
-curl -fsSL https://pixi.sh/install.sh | sh
+pixi init my-app && cd my-app
+```
+
+Add the Modular compiler and community channels to `pixi.toml`:
+
+```toml
+[workspace]
+channels = [
+    "https://conda.modular.com/max",
+    "https://repo.prefix.dev/modular-community",
+    "conda-forge",
+]
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
+```
+
+```sh
+pixi add mojo-http2
+```
+
+Pulls in [mojo-net](https://github.com/nsalerni/mojo-net) and
+[mojo-tls](https://github.com/nsalerni/mojo-tls). Then `from h2 import
+Http2Connection` / `from hpack import Encoder`. The package is on
+[modular-community](https://github.com/modular/modular-community).
+
+### From source (contributors)
+
+```sh
 git clone https://github.com/nsalerni/mojo-http2.git
 cd mojo-http2
 pixi install
@@ -77,8 +103,11 @@ pixi run compliance
 
 ## Related packages
 
+Part of the Mojo networking stack:
+
 [mojo-net](https://github.com/nsalerni/mojo-net) ·
 [mojo-tls](https://github.com/nsalerni/mojo-tls) ·
+[protomojo](https://github.com/nsalerni/protomojo) ·
 [grpc-mojo](https://github.com/nsalerni/grpc-mojo)
 
 ## Contributing

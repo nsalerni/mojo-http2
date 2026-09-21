@@ -2,9 +2,12 @@
 
 ## Unreleased
 
-- Pin source, recipe, and package tests to mojo-net 0.2.6 and mojo-tls
-  0.3.2. Until those tags exist, `deps.json` tracks the stacked release
-  branches.
+## 0.2.9 - 2026-09-21
+
+- Pin source, recipe, and package tests to mojo-net 0.2.7 and mojo-tls
+  0.3.3.
+- Document residual HTTP/2 security limits (`SETTINGS_TIMEOUT` is not
+  armed; header values are UTF-8 `String`).
 
 ## 0.2.8 - 2026-09-03
 
