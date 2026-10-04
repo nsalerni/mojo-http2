@@ -1779,6 +1779,13 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 if f.name == "te" and f.value != "trailers":
                     return False
                 if f.name == "content-length":
+                    # RFC 9110 §8.6: Content-Length = 1*DIGIT. Int() also
+                    # accepts signs, whitespace, and digit separators.
+                    if f.value.byte_length() == 0:
+                        return False
+                    for d in f.value.as_bytes():
+                        if Int(d) < ord("0") or Int(d) > ord("9"):
+                            return False
                     try:
                         self.streams[sid].expected_content_length = Int(f.value)
                     except:

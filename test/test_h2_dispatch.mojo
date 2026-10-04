@@ -5,6 +5,7 @@ from std.testing import assert_equal, assert_false, assert_true
 
 from h2 import (
     ERR_CANCEL,
+    ERR_PROTOCOL_ERROR,
     FLAG_END_HEADERS,
     FLAG_END_STREAM,
     FRAME_CONTINUATION,
@@ -341,6 +342,41 @@ def test_half_closed_local_still_counts() raises:
     assert_true("MAX_CONCURRENT_STREAMS" in msg, msg)
 
 
+def request_with_content_length(
+    hex_block: StringSpan,
+) raises -> Http2Connection[SinkStream]:
+    var conn = Http2Connection(SinkStream(), is_client=False)
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 1, from_hex(hex_block))
+    )
+    return conn^
+
+
+def test_server_accepts_digit_content_length() raises:
+    # :method=GET, :scheme=http, :path=/, content-length=10
+    var conn = request_with_content_length("8286840f0d023130")
+    assert_true(conn.streams[1].headers_done, "valid request is accepted")
+    assert_false(Bool(conn.streams[1].reset_code), "stream stays open")
+    assert_equal(conn.streams[1].expected_content_length, 10)
+
+
+def test_server_rejects_non_digit_content_length() raises:
+    # :method=GET, :scheme=http, :path=/, content-length=<value>
+    var blocks = [
+        "8286840f0d022d31",  # "-1"
+        "8286840f0d022b35",  # "+5"
+        "8286840f0d03203720",  # " 7 "
+        "8286840f0d03315f30",  # "1_0"
+    ]
+    for block in blocks:
+        var conn = request_with_content_length(block)
+        assert_false(conn.streams[1].headers_done, block)
+        assert_equal(
+            conn.streams[1].reset_code.value(), ERR_PROTOCOL_ERROR, block
+        )
+        assert_false(conn.sent_goaway, "malformed request is a stream error")
+
+
 def test_process_frame_ignores_unknown_type() raises:
     var conn = make_client()
     conn.process_frame(make_frame(0xFE, 0, 0, List[Byte]()))
@@ -362,5 +398,7 @@ def main() raises:
     test_open_stream_honors_peer_max_concurrent()
     test_rst_frees_concurrent_stream_slot()
     test_half_closed_local_still_counts()
+    test_server_accepts_digit_content_length()
+    test_server_rejects_non_digit_content_length()
     test_process_frame_ignores_unknown_type()
     print("test_h2_dispatch: all tests passed")
