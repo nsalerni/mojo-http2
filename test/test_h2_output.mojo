@@ -20,7 +20,7 @@ from h2 import (
     put_u16_be,
     put_u32_be,
 )
-from h2.frame import SETTINGS_ENABLE_PUSH
+from h2.frame import SETTINGS_ENABLE_PUSH, SETTINGS_MAX_CONCURRENT_STREAMS
 from hpack import HeaderField
 from net import IOStream
 from testutil import from_hex, to_hex
@@ -741,6 +741,29 @@ def test_public_queue_order_and_blocking_flush() raises:
     assert_equal(conn.pending_output_len(), 0)
 
 
+def test_rst_frees_slot_once_queued() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_MAX_CONCURRENT_STREAMS)
+    put_u32_be(payload, 1)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    _ = conn.take_pending_output()
+    var sid = conn.open_stream()
+
+    var raised = False
+    try:
+        conn.send_rst_stream(sid, ERR_CANCEL)
+    except:
+        raised = True
+    assert_true(raised, "rejected write surfaces from send_rst_stream")
+    assert_equal(conn.pending_output_len(), 13, "RST_STREAM stays queued")
+    assert_equal(conn.live_stream_count(), 0, "queued RST_STREAM frees slot")
+
+    conn.stream.reject_writes = False
+    conn.flush_output()
+    assert_equal(conn.open_stream(), sid + 2)
+
+
 def test_queue_bound_is_atomic() raises:
     var conn = make_client()
     conn.max_pending_output_size = 16
@@ -942,6 +965,7 @@ def main() raises:
     test_queue_data_respects_output_capacity()
     test_header_rejection_preserves_hpack_state()
     test_public_queue_order_and_blocking_flush()
+    test_rst_frees_slot_once_queued()
     test_queue_bound_is_atomic()
     test_dispatch_backpressure_is_retryable()
     test_failed_flush_retains_output()

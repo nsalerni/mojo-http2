@@ -6,9 +6,11 @@ from std.testing import assert_equal, assert_false, assert_true
 from h2 import (
     ERR_CANCEL,
     ERR_PROTOCOL_ERROR,
+    ERR_REFUSED_STREAM,
     FLAG_END_HEADERS,
     FLAG_END_STREAM,
     FRAME_CONTINUATION,
+    FRAME_DATA,
     FRAME_HEADERS,
     FRAME_SETTINGS,
     Frame,
@@ -342,6 +344,46 @@ def test_half_closed_local_still_counts() raises:
     assert_true("MAX_CONCURRENT_STREAMS" in msg, msg)
 
 
+def test_queued_rst_frees_concurrent_stream_slot() raises:
+    var conn = make_client()
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_MAX_CONCURRENT_STREAMS)
+    put_u32_be(payload, 1)
+    conn.process_frame(make_frame(FRAME_SETTINGS, 0, 0, payload^))
+    conn.queue_rst_stream(1, ERR_CANCEL)
+    assert_equal(conn.streams[1].reset_code.or_else(0), ERR_CANCEL)
+    assert_equal(conn.live_stream_count(), 0)
+    assert_equal(conn.open_stream(), 3)
+
+
+def test_server_counts_half_closed_local_peer_streams() raises:
+    var conn = Http2Connection(
+        SinkStream(), is_client=False, max_concurrent_streams=1
+    )
+    # :method=GET, :scheme=http, :path=/
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 1, from_hex("828684"))
+    )
+    var response = [HeaderField(":status", "200")]
+    conn.queue_headers(1, Span(response), end_stream=True)
+    assert_equal(conn.live_stream_count(), 1, "half-closed(local) is live")
+
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 3, from_hex("828684"))
+    )
+    assert_equal(
+        conn.streams[3].reset_code.or_else(0),
+        ERR_REFUSED_STREAM,
+        "half-closed(local) stream still occupies the peer's slot",
+    )
+
+    conn.process_frame(make_frame(FRAME_DATA, FLAG_END_STREAM, 1, List[Byte]()))
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 5, from_hex("828684"))
+    )
+    assert_false(Bool(conn.streams[5].reset_code), "closed stream frees slot")
+
+
 def request_with_content_length(
     hex_block: StringSpan,
 ) raises -> Http2Connection[SinkStream]:
@@ -398,6 +440,8 @@ def main() raises:
     test_open_stream_honors_peer_max_concurrent()
     test_rst_frees_concurrent_stream_slot()
     test_half_closed_local_still_counts()
+    test_queued_rst_frees_concurrent_stream_slot()
+    test_server_counts_half_closed_local_peer_streams()
     test_server_accepts_digit_content_length()
     test_server_rejects_non_digit_content_length()
     test_process_frame_ignores_unknown_type()
