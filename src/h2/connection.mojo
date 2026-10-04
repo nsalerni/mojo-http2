@@ -151,6 +151,20 @@ struct StreamState(Movable):
         """
         return self.end_stream or Bool(self.reset_code)
 
+    def occupies_slot(self) -> Bool:
+        """Reports whether this stream counts toward MAX_CONCURRENT_STREAMS.
+
+        Open and both half-closed states count ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
+        §5.1.2). A stream is released once either side resets it, or once
+        both sides have sent END_STREAM.
+
+        Returns:
+            True while the stream is open or half-closed.
+        """
+        if self.reset_code:
+            return False
+        return not (self.local_end and self.end_stream)
+
 
 struct Http2Connection[S: IOStream = TCPStream](Movable):
     """HTTP/2 connection state machine over a reliable byte stream.
@@ -571,13 +585,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             return False
         if len(self.streams[stream_id].data) != 0:
             return False
-        if not (
-            Bool(self.streams[stream_id].reset_code)
-            or (
-                self.streams[stream_id].local_end
-                and self.streams[stream_id].end_stream
-            )
-        ):
+        if self.streams[stream_id].occupies_slot():
             return False
 
         var remaining = List[UInt32](capacity=len(self.stream_ids))
@@ -594,22 +602,14 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.stream_ids = remaining^
         return True
 
-    def _local_concurrent_streams(self) raises -> Int:
-        """Counts locally-initiated streams that still occupy a slot.
-
-        Open and half-closed streams both count ([RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
-        §5.1.2). A stream is released only after both sides end, or after
-        RST_STREAM.
-        """
+    def _concurrent_streams(self, *, local: Bool) raises -> Int:
+        """Counts locally- or peer-initiated streams that occupy a slot."""
         var active = 0
         for id in self.stream_ids:
-            if (id % 2 == 1) != self.is_client:
+            if ((id % 2 == 1) == self.is_client) != local:
                 continue
-            if self.streams[id].local_end and self.streams[id].end_stream:
-                continue
-            if Bool(self.streams[id].reset_code):
-                continue
-            active += 1
+            if self.streams[id].occupies_slot():
+                active += 1
         return active
 
     def live_stream_count(self) raises -> Int:
@@ -627,11 +627,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         """
         var live = 0
         for id in self.stream_ids:
-            if Bool(self.streams[id].reset_code):
-                continue
-            if self.streams[id].local_end and self.streams[id].end_stream:
-                continue
-            live += 1
+            if self.streams[id].occupies_slot():
+                live += 1
         return live
 
     def open_stream(mut self) raises -> UInt32:
@@ -649,7 +646,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         if self.goaway_code or self.sent_goaway:
             raise Error("h2: connection is shutting down (GOAWAY)")
         var peer_max = Int(self.peer_settings.max_concurrent_streams)
-        if self._local_concurrent_streams() >= peer_max:
+        if self._concurrent_streams(local=True) >= peer_max:
             raise Error("h2: peer MAX_CONCURRENT_STREAMS exceeded")
         var id = self.next_stream_id
         self.next_stream_id += 2
@@ -858,9 +855,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
     def queue_rst_stream(mut self, stream_id: UInt32, code: UInt32) raises:
         """Queues RST_STREAM without performing transport I/O.
 
-        Only queues the frame; callers wanting local bookkeeping updated
-        should rely on the connection's own error paths, which mark the
-        stream reset before sending.
+        Once the frame is queued, a known stream is marked reset locally and
+        no longer occupies a SETTINGS_MAX_CONCURRENT_STREAMS slot. Queued
+        bytes are written in FIFO order and survive failed flushes, so the
+        queue, not the transport, decides when the reset is committed. If
+        the frame does not fit, the stream is left unchanged.
 
         Args:
             stream_id: The stream to reset.
@@ -872,13 +871,15 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         var payload = List[Byte](capacity=4)
         put_u32_be(payload, code)
         self._queue_frame(FRAME_RST_STREAM, 0, stream_id, payload)
+        if stream_id in self.streams:
+            self.streams[stream_id].local_reset = True
+            self.streams[stream_id].reset_code = code
 
     def send_rst_stream(mut self, stream_id: UInt32, code: UInt32) raises:
         """Queues and synchronously flushes RST_STREAM.
 
-        Marks the stream reset locally after the RST_STREAM frame is
-        queued and flushed, so it no longer occupies a
-        SETTINGS_MAX_CONCURRENT_STREAMS slot.
+        Stream bookkeeping follows `queue_rst_stream`: if the flush fails,
+        the frame stays queued and the stream is already reset.
 
         Args:
             stream_id: The stream to reset.
@@ -890,9 +891,6 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self.flush_output()
         self.queue_rst_stream(stream_id, code)
         self.flush_output()
-        if stream_id in self.streams:
-            self.streams[stream_id].local_reset = True
-            self.streams[stream_id].reset_code = code
 
     def queue_goaway(mut self, code: UInt32) raises:
         """Queues GOAWAY without performing transport I/O.
@@ -955,12 +953,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
 
     def _stream_error(mut self, sid: UInt32, code: UInt32) raises:
         """Stream error: RST_STREAM with the code; connection continues."""
-        if self._is_closed(sid):
-            self.queue_rst_stream(sid, code)
-            return
-        self._ensure_stream(sid)
-        self.streams[sid].local_reset = True
-        self.streams[sid].reset_code = code
+        if not self._is_closed(sid):
+            self._ensure_stream(sid)
         self.queue_rst_stream(sid, code)
 
     def _bump_control(mut self) raises:
@@ -1682,17 +1676,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                 ERR_ENHANCE_YOUR_CALM, String("header list too large")
             )
         if is_new and peer_initiated:
-            var active = 0
-            for id in self.stream_ids:
-                # Open or half-closed(remote) both count (§5.1.2):
-                # a stream stops counting only once fully closed.
-                if (
-                    (id % 2 == 1) != self.is_client
-                    and not self.streams[id].local_end
-                    and not Bool(self.streams[id].reset_code)
-                ):
-                    active += 1
-            if active >= self.max_concurrent_streams:
+            if self._concurrent_streams(local=False) >= self.max_concurrent_streams:
                 self._ensure_stream(stream_id)
                 self._stream_error(stream_id, ERR_REFUSED_STREAM)
                 return

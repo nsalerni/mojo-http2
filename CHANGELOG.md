@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- One stream-slot predicate (`StreamState.occupies_slot`) now backs
+  `open_stream`, the server's peer `MAX_CONCURRENT_STREAMS` check,
+  `live_stream_count`, and `retire_stream`. The server no longer frees a
+  peer stream's slot when only its own side has sent END_STREAM.
+- `queue_rst_stream` marks a known stream reset once the frame is queued.
+  Readiness-driven resets now free the slot, and `send_rst_stream` keeps
+  the stream reset when its flush fails with the frame still queued.
+
 ## 0.2.9 - 2026-09-21
 
 - Pin source, recipe, and package tests to mojo-net 0.2.7 and mojo-tls
