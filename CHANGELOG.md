@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Discarded DATA returns connection flow-control credit. A frame on a
+  retired stream, a frame that exceeds the stream receive window, or DATA
+  after the peer sent END_STREAM is counted against the connection window
+  and answered with WINDOW_UPDATE (RFC 9113 §6.9). A retired stream whose
+  frame exceeds the connection window is a FLOW_CONTROL_ERROR. Previously
+  the peer's connection send window shrank on every cancelled call and the
+  connection could stall.
 - One stream-slot predicate (`StreamState.occupies_slot`) now backs
   `open_stream`, the server's peer `MAX_CONCURRENT_STREAMS` check,
   `live_stream_count`, and `retire_stream`. The server no longer frees a

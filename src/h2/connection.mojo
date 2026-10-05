@@ -1259,8 +1259,8 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             are available, the frame is not processed and the caller can
             drain the queue before retrying it.
         """
-        # One DATA frame can queue both RST_STREAM for a content-length
-        # mismatch and a connection WINDOW_UPDATE. Reserve that worst case
+        # Discarded DATA and a content-length mismatch can queue both
+        # RST_STREAM and a connection WINDOW_UPDATE. Reserve that worst case
         # before mutating receive state so queue backpressure is retryable.
         self._ensure_output_capacity(2 * (FRAME_HEADER_LEN + 4))
         var h = frame.header
@@ -1479,21 +1479,25 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self._conn_error(ERR_PROTOCOL_ERROR, String("DATA on stream 0"))
         if self._is_idle(h.stream_id):
             self._conn_error(ERR_PROTOCOL_ERROR, String("DATA on idle stream"))
-        if self._is_closed(h.stream_id):
-            # Preserve closed-vs-idle classification without recreating the
-            # retired state record.
-            self.queue_rst_stream(h.stream_id, ERR_STREAM_CLOSED)
-            return
-        # Flow control counts the whole frame payload, padding included.
+        # RFC 9113 §6.9: every DATA frame counts against the connection
+        # window, padding included. Credit for bytes we do not buffer is
+        # returned immediately, unless the frame is a connection error.
         self.recv_window -= h.length
         if self.recv_window < 0:
             self._conn_error(
                 ERR_FLOW_CONTROL_ERROR, String("connection window exceeded")
             )
+        if self._is_closed(h.stream_id):
+            # Preserve closed-vs-idle classification without recreating the
+            # retired state record.
+            self.queue_rst_stream(h.stream_id, ERR_STREAM_CLOSED)
+            self._replenish(h)
+            return
         self._ensure_stream(h.stream_id)
         self.streams[h.stream_id].recv_window -= h.length
         if self.streams[h.stream_id].recv_window < 0:
             self._stream_error(h.stream_id, ERR_FLOW_CONTROL_ERROR)
+            self._replenish(h)
             return
         if self.streams[h.stream_id].reset_code:
             # Frames on a closed (reset) stream: connection error (§5.1),
@@ -1504,6 +1508,7 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self._conn_error(ERR_STREAM_CLOSED, String("DATA on closed stream"))
         if self.streams[h.stream_id].end_stream:
             self._stream_error(h.stream_id, ERR_STREAM_CLOSED)
+            self._replenish(h)
             return
         var payload = Span(frame_payload)
         var data_len = len(payload)

@@ -7,6 +7,8 @@
 #   STREAM <expected-id> <hex response bytes>
 #   ...
 #   STALE <hex DATA frame for the first retired id>
+# Stale DATA produces RST_STREAM(STREAM_CLOSED). A non-empty payload also
+# produces a connection WINDOW_UPDATE of that payload length.
 
 from std.sys import argv
 
@@ -14,6 +16,7 @@ from h2 import (
     ERR_STREAM_CLOSED,
     FRAME_HEADER_LEN,
     FRAME_RST_STREAM,
+    FRAME_WINDOW_UPDATE,
     FrameHeader,
     Http2Connection,
     get_u32_be,
@@ -124,16 +127,36 @@ def main() raises:
         raise Error("retirement probe input count mismatch")
     _ = conn.feed_input(Span(stale_wire))
     var output = conn.take_pending_output()
-    if len(output) != FRAME_HEADER_LEN + 4:
-        raise Error("retired stream did not produce one RST_STREAM")
+    if len(output) < FRAME_HEADER_LEN + 4:
+        raise Error("retired stream did not produce RST_STREAM")
     var header = FrameHeader.parse(Span(output))
     var code = get_u32_be(Span(output), FRAME_HEADER_LEN)
     if (
         header.frame_type != FRAME_RST_STREAM
         or header.stream_id != 1
+        or header.length != 4
         or code != ERR_STREAM_CLOSED
     ):
         raise Error("retired stream was not classified closed")
+    if len(stale_wire) < FRAME_HEADER_LEN:
+        raise Error("stale DATA frame is truncated")
+    var stale = FrameHeader.parse(Span(stale_wire))
+    var rest_at = FRAME_HEADER_LEN + 4
+    if stale.length == 0:
+        if len(output) != rest_at:
+            raise Error("empty DATA must not send WINDOW_UPDATE")
+    else:
+        if len(output) != rest_at + FRAME_HEADER_LEN + 4:
+            raise Error("retired DATA did not return connection credit")
+        var update = FrameHeader.parse(Span(output)[rest_at : len(output)])
+        var increment = get_u32_be(Span(output), rest_at + FRAME_HEADER_LEN)
+        if (
+            update.frame_type != FRAME_WINDOW_UPDATE
+            or update.stream_id != 0
+            or update.length != 4
+            or increment != UInt32(stale.length)
+        ):
+            raise Error("retired DATA returned the wrong connection credit")
 
     var outfile = open(String(args[2]), "w")
     var result = (

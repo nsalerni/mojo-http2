@@ -4,21 +4,26 @@
 from std.testing import assert_equal, assert_false, assert_true
 
 from h2 import (
+    DEFAULT_WINDOW_SIZE,
     ERR_CANCEL,
     ERR_FLOW_CONTROL_ERROR,
     ERR_PROTOCOL_ERROR,
     ERR_REFUSED_STREAM,
+    ERR_STREAM_CLOSED,
     FLAG_END_HEADERS,
     FLAG_END_STREAM,
     FRAME_CONTINUATION,
     FRAME_DATA,
     FRAME_GOAWAY,
+    FRAME_HEADER_LEN,
     FRAME_HEADERS,
+    FRAME_RST_STREAM,
     FRAME_SETTINGS,
     FRAME_WINDOW_UPDATE,
     Frame,
     FrameHeader,
     Http2Connection,
+    get_u32_be,
     put_u16_be,
     put_u32_be,
 )
@@ -473,6 +478,197 @@ def test_process_frame_ignores_unknown_type() raises:
     assert_false(conn.sent_goaway, "unknown frames are ignored")
 
 
+def assert_rst_and_connection_credit(
+    output: Span[Byte, _],
+    stream_id: UInt32,
+    code: UInt32,
+    increment: Int,
+) raises:
+    assert_equal(len(output), 2 * (FRAME_HEADER_LEN + 4))
+    var rst = FrameHeader.parse(output)
+    assert_equal(rst.frame_type, FRAME_RST_STREAM)
+    assert_equal(rst.stream_id, stream_id)
+    assert_equal(rst.length, 4)
+    assert_equal(Int(get_u32_be(output, FRAME_HEADER_LEN)), Int(code))
+    var credit_at = FRAME_HEADER_LEN + 4
+    var update = FrameHeader.parse(output[credit_at : len(output)])
+    assert_equal(update.frame_type, FRAME_WINDOW_UPDATE)
+    assert_equal(update.stream_id, 0)
+    assert_equal(update.length, 4)
+    assert_equal(
+        Int(get_u32_be(output, credit_at + FRAME_HEADER_LEN) & 0x7FFFFFFF),
+        increment,
+    )
+
+
+def retire_local_stream(mut conn: Http2Connection[SinkStream]) raises:
+    conn.queue_rst_stream(1, ERR_CANCEL)
+    assert_true(conn.retire_stream(1), "reset stream retires")
+    assert_false(1 in conn.streams, "retired id leaves the stream table")
+    _ = conn.take_pending_output()
+
+
+def test_retired_stream_data_returns_connection_credit() raises:
+    var conn = make_client()
+    retire_local_stream(conn)
+    conn.process_frame(make_frame(FRAME_DATA, 0, 1, List[Byte]()))
+    var empty_out = conn.take_pending_output()
+    assert_equal(len(empty_out), FRAME_HEADER_LEN + 4, "empty DATA sends only RST")
+    var empty_rst = FrameHeader.parse(Span(empty_out))
+    assert_equal(empty_rst.frame_type, FRAME_RST_STREAM)
+    assert_equal(
+        Int(get_u32_be(Span(empty_out), FRAME_HEADER_LEN)),
+        Int(ERR_STREAM_CLOSED),
+    )
+    assert_equal(conn.recv_window, DEFAULT_WINDOW_SIZE)
+
+    var payload = List[Byte](length=100, fill=0xAB)
+    conn.process_frame(make_frame(FRAME_DATA, 0, 1, payload^))
+    assert_false(conn.sent_goaway, "in-window DATA on a retired stream continues")
+    assert_false(1 in conn.streams, "retired DATA does not recreate stream state")
+    assert_equal(conn.recv_window, DEFAULT_WINDOW_SIZE)
+    assert_rst_and_connection_credit(
+        Span(conn.take_pending_output()), 1, ERR_STREAM_CLOSED, 100
+    )
+
+
+def test_retired_stream_over_window_is_connection_error() raises:
+    var conn = make_client()
+    retire_local_stream(conn)
+    # A legal frame is at most 16,384 bytes and the connection window is
+    # restored after every accepted DATA frame, so shrink the remaining
+    # credit below this payload.
+    conn.recv_window = 8
+    var payload = List[Byte](length=9, fill=1)
+    var raised = False
+    try:
+        conn.process_frame(make_frame(FRAME_DATA, 0, 1, payload^))
+    except error:
+        raised = True
+        assert_true("connection window exceeded" in String(error), String(error))
+    assert_true(raised, "over-window DATA on a retired stream ends the connection")
+    assert_true(conn.sent_goaway, "flow-control failure sends GOAWAY")
+    assert_equal(conn.recv_window, -1, "connection credit is not returned")
+    assert_false(1 in conn.streams, "the error does not recreate stream state")
+    var out = conn.take_pending_output()
+    assert_equal(len(out), 17, "only GOAWAY is queued")
+    assert_equal(out[3], FRAME_GOAWAY)
+    assert_equal(Int(get_u32_be(Span(out), 13)), Int(ERR_FLOW_CONTROL_ERROR))
+
+
+def test_stream_window_overflow_returns_connection_credit() raises:
+    var conn = Http2Connection(
+        SinkStream(), is_client=True, initial_window_size=32
+    )
+    _ = conn.take_pending_output()
+    assert_equal(conn.open_stream(), 1)
+    assert_equal(conn.streams[1].recv_window, 32)
+    assert_equal(conn.recv_window, DEFAULT_WINDOW_SIZE)
+    var payload = List[Byte](length=40, fill=7)
+    conn.process_frame(make_frame(FRAME_DATA, 0, 1, payload^))
+    assert_equal(
+        conn.streams[1].reset_code.or_else(0),
+        ERR_FLOW_CONTROL_ERROR,
+    )
+    assert_equal(len(conn.streams[1].data), 0, "rejected DATA is not buffered")
+    assert_false(conn.sent_goaway, "stream-window overflow stays a stream error")
+    assert_equal(conn.recv_window, DEFAULT_WINDOW_SIZE)
+    assert_rst_and_connection_credit(
+        Span(conn.take_pending_output()), 1, ERR_FLOW_CONTROL_ERROR, 40
+    )
+
+
+def test_data_after_peer_end_stream_returns_connection_credit() raises:
+    var conn = make_client()
+    conn.process_frame(
+        make_frame(
+            FRAME_HEADERS,
+            FLAG_END_HEADERS | FLAG_END_STREAM,
+            1,
+            response_block(),
+        )
+    )
+    _ = conn.take_pending_output()
+    assert_true(conn.streams[1].end_stream, "peer finished the stream")
+    var payload = List[Byte](length=25, fill=3)
+    conn.process_frame(make_frame(FRAME_DATA, 0, 1, payload^))
+    assert_equal(conn.streams[1].reset_code.or_else(0), ERR_STREAM_CLOSED)
+    assert_equal(len(conn.streams[1].data), 0, "late DATA is not buffered")
+    assert_false(conn.sent_goaway, "DATA after END_STREAM stays a stream error")
+    assert_equal(conn.recv_window, DEFAULT_WINDOW_SIZE)
+    assert_rst_and_connection_credit(
+        Span(conn.take_pending_output()), 1, ERR_STREAM_CLOSED, 25
+    )
+
+
+def drain_to_peer(
+    mut source: Http2Connection[SinkStream],
+    mut target: Http2Connection[SinkStream],
+) raises:
+    var wire = source.take_pending_output()
+    if len(wire) == 0:
+        return
+    _ = target.feed_input(Span(wire))
+
+
+def exchange(
+    mut client: Http2Connection[SinkStream],
+    mut server: Http2Connection[SinkStream],
+) raises:
+    var guard = 0
+    while client.pending_output_len() > 0 or server.pending_output_len() > 0:
+        if client.pending_output_len() > 0:
+            drain_to_peer(client, server)
+        if server.pending_output_len() > 0:
+            drain_to_peer(server, client)
+        guard += 1
+        if guard > 8:
+            raise Error("in-memory exchange did not settle")
+
+
+def test_cancel_and_retire_restores_client_send_window() raises:
+    var client = Http2Connection(SinkStream(), is_client=True)
+    var server = Http2Connection(SinkStream(), is_client=False)
+    exchange(client, server)
+    assert_true(client.peer_settings_received, "client finished the preface")
+    assert_true(server.peer_settings_received, "server finished the preface")
+    assert_equal(client.send_window, DEFAULT_WINDOW_SIZE)
+    assert_equal(server.recv_window, DEFAULT_WINDOW_SIZE)
+
+    var late_len = 16000
+    for cycle in range(10):
+        var sid = client.open_stream()
+        var headers = [
+            HeaderField(":method", "POST"),
+            HeaderField(":scheme", "http"),
+            HeaderField(":path", "/cancel"),
+            HeaderField(":authority", "localhost"),
+        ]
+        client.queue_headers(sid, Span(headers), end_stream=False)
+        exchange(client, server)
+        assert_true(server.streams[sid].headers_done, "server accepted the request")
+
+        server.queue_rst_stream(sid, ERR_CANCEL)
+        assert_true(server.retire_stream(sid), "cancelled stream retires")
+        assert_false(sid in server.streams, "retired id is closed")
+
+        var body = List[Byte](length=late_len, fill=UInt8(cycle + 1))
+        var consumed = client.queue_data(sid, Span(body), end_stream=False)
+        assert_equal(consumed, late_len, "late DATA fits the connection window")
+        assert_equal(client.send_window, DEFAULT_WINDOW_SIZE - late_len)
+        exchange(client, server)
+
+        assert_false(server.sent_goaway, "late DATA is not a connection error")
+        assert_false(sid in server.streams, "late DATA stays on the retired id")
+        assert_equal(server.recv_window, DEFAULT_WINDOW_SIZE)
+        assert_equal(
+            client.send_window,
+            DEFAULT_WINDOW_SIZE,
+            "cancelled DATA returns connection credit",
+        )
+    assert_equal(client.live_stream_count(), 0)
+
+
 def main() raises:
     test_process_frame_completes_split_headers()
     test_process_frame_accepts_multiple_continuations()
@@ -495,4 +691,9 @@ def main() raises:
     test_server_accepts_digit_content_length()
     test_server_rejects_non_digit_content_length()
     test_process_frame_ignores_unknown_type()
+    test_retired_stream_data_returns_connection_credit()
+    test_retired_stream_over_window_is_connection_error()
+    test_stream_window_overflow_returns_connection_credit()
+    test_data_after_peer_end_stream_returns_connection_credit()
+    test_cancel_and_retire_restores_client_send_window()
     print("test_h2_dispatch: all tests passed")
