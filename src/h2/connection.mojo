@@ -1423,6 +1423,15 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         if delta != 0:
             for id in self.stream_ids:
                 self.streams[id].send_window += delta
+                if (
+                    self.streams[id].send_window > 0x7FFFFFFF
+                    and not self.streams[id].reset_code
+                    and not self.streams[id].local_end
+                ):
+                    self._conn_error(
+                        ERR_FLOW_CONTROL_ERROR,
+                        String("INITIAL_WINDOW_SIZE overflows stream window"),
+                    )
         self._queue_frame(FRAME_SETTINGS, FLAG_ACK, 0, List[Byte]())
 
     def _on_window_update(
