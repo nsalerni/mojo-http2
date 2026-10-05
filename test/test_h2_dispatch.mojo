@@ -5,21 +5,28 @@ from std.testing import assert_equal, assert_false, assert_true
 
 from h2 import (
     ERR_CANCEL,
+    ERR_FLOW_CONTROL_ERROR,
     ERR_PROTOCOL_ERROR,
     ERR_REFUSED_STREAM,
     FLAG_END_HEADERS,
     FLAG_END_STREAM,
     FRAME_CONTINUATION,
     FRAME_DATA,
+    FRAME_GOAWAY,
     FRAME_HEADERS,
     FRAME_SETTINGS,
+    FRAME_WINDOW_UPDATE,
     Frame,
     FrameHeader,
     Http2Connection,
     put_u16_be,
     put_u32_be,
 )
-from h2.frame import SETTINGS_HEADER_TABLE_SIZE, SETTINGS_MAX_CONCURRENT_STREAMS
+from h2.frame import (
+    SETTINGS_HEADER_TABLE_SIZE,
+    SETTINGS_INITIAL_WINDOW_SIZE,
+    SETTINGS_MAX_CONCURRENT_STREAMS,
+)
 from hpack import HeaderField
 from net import IOStream
 from testutil import from_hex
@@ -384,6 +391,47 @@ def test_server_counts_half_closed_local_peer_streams() raises:
     assert_false(Bool(conn.streams[5].reset_code), "closed stream frees slot")
 
 
+def window_update(stream_id: UInt32, increment: UInt32) -> Frame:
+    var payload = List[Byte]()
+    put_u32_be(payload, increment)
+    return make_frame(FRAME_WINDOW_UPDATE, 0, stream_id, payload^)
+
+
+def initial_window_settings(value: UInt32) -> Frame:
+    var payload = List[Byte]()
+    put_u16_be(payload, SETTINGS_INITIAL_WINDOW_SIZE)
+    put_u32_be(payload, value)
+    return make_frame(FRAME_SETTINGS, 0, 0, payload^)
+
+
+def test_initial_window_change_rejects_stream_window_overflow() raises:
+    var conn = make_client()
+    # Stream 1 send window: 65535 + (2^31 - 1 - 65535) = 2^31 - 1.
+    conn.process_frame(window_update(1, 0x7FFFFFFF - 65535))
+    assert_equal(conn.streams[1].send_window, 0x7FFFFFFF)
+    _ = conn.take_pending_output()
+    var raised = False
+    try:
+        conn.process_frame(initial_window_settings(65536))
+    except error:
+        raised = True
+        assert_true("INITIAL_WINDOW_SIZE" in String(error), String(error))
+    assert_true(raised, "RFC 9113 6.9.2: window overflow is a connection error")
+    var out = conn.take_pending_output()
+    assert_equal(len(out), 17, "only GOAWAY is queued, no SETTINGS ACK")
+    assert_equal(out[3], FRAME_GOAWAY)
+    assert_equal(out[16], UInt8(ERR_FLOW_CONTROL_ERROR))
+
+
+def test_initial_window_change_ignores_finished_streams() raises:
+    var conn = make_client()
+    conn.process_frame(window_update(1, 0x7FFFFFFF - 65535))
+    conn.streams[1].local_end = True
+    conn.process_frame(initial_window_settings(65536))
+    assert_false(conn.sent_goaway, "a stream we finished sending on is exempt")
+    assert_equal(Int(conn.peer_settings.initial_window_size), 65536)
+
+
 def request_with_content_length(
     hex_block: StringSpan,
 ) raises -> Http2Connection[SinkStream]:
@@ -442,6 +490,8 @@ def main() raises:
     test_half_closed_local_still_counts()
     test_queued_rst_frees_concurrent_stream_slot()
     test_server_counts_half_closed_local_peer_streams()
+    test_initial_window_change_rejects_stream_window_overflow()
+    test_initial_window_change_ignores_finished_streams()
     test_server_accepts_digit_content_length()
     test_server_rejects_non_digit_content_length()
     test_process_frame_ignores_unknown_type()
