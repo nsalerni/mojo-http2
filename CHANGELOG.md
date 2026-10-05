@@ -9,6 +9,10 @@
 - `queue_rst_stream` marks a known stream reset once the frame is queued.
   Readiness-driven resets now free the slot, and `send_rst_stream` keeps
   the stream reset when its flush fails with the frame still queued.
+- A peer `SETTINGS_INITIAL_WINDOW_SIZE` change that pushes a stream's send
+  window above 2^31 - 1 is now a FLOW_CONTROL_ERROR connection error
+  (RFC 9113 §6.9.2). Streams we have reset or finished sending on are
+  exempt.
 
 ## 0.2.9 - 2026-09-21
 
