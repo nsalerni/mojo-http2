@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.10 - 2026-10-08
+
 - Discarded DATA returns connection flow-control credit. A frame on a
   retired stream, a frame that exceeds the stream receive window, or DATA
   after the peer sent END_STREAM is counted against the connection window
@@ -20,6 +22,10 @@
   window above 2^31 - 1 is now a FLOW_CONTROL_ERROR connection error
   (RFC 9113 §6.9.2). Streams we have reset or finished sending on are
   exempt.
+- A request `content-length` must be one or more digits (RFC 9110 §8.6).
+  A non-digit value is a stream PROTOCOL_ERROR. Previously `Int()` accepted
+  signs, whitespace, and digit separators, and `-1` matched the
+  absent-header sentinel, so the body-length check was skipped.
 
 ## 0.2.9 - 2026-09-21
 
