@@ -472,6 +472,131 @@ def test_server_rejects_non_digit_content_length() raises:
         assert_false(conn.sent_goaway, "malformed request is a stream error")
 
 
+def test_server_rejects_disagreeing_content_length() raises:
+    # content-length: 10, then content-length: 2. The body cannot satisfy both.
+    var conn = request_with_content_length("8286845c82083f5c8117")
+    assert_false(conn.streams[1].headers_done, "disagreeing lengths are malformed")
+    assert_equal(conn.streams[1].reset_code.value(), ERR_PROTOCOL_ERROR)
+    assert_false(conn.sent_goaway, "malformed request is a stream error")
+
+
+def test_server_accepts_repeated_content_length() raises:
+    # The same integer twice, including a leading-zero spelling.
+    var repeated = request_with_content_length("8286845c82083fbe")
+    assert_true(repeated.streams[1].headers_done, "a repeated length is one value")
+    assert_false(Bool(repeated.streams[1].reset_code))
+    assert_equal(repeated.streams[1].expected_content_length, 10)
+
+    var equivalent = request_with_content_length("8286845c82083f5c820041")
+    assert_true(equivalent.streams[1].headers_done, "10 and 010 are the same length")
+    assert_false(Bool(equivalent.streams[1].reset_code))
+    assert_equal(equivalent.streams[1].expected_content_length, 10)
+
+
+def test_server_rejects_body_beyond_content_length() raises:
+    # content-length: 0. One DATA byte can never match, so it is not buffered.
+    var conn = request_with_content_length("8286845c8107")
+    assert_equal(conn.streams[1].expected_content_length, 0)
+    _ = conn.take_pending_output()
+    var payload = List[Byte](length=1, fill=0x61)
+    conn.process_frame(make_frame(FRAME_DATA, 0, 1, payload^))
+    assert_equal(conn.streams[1].reset_code.or_else(0), ERR_PROTOCOL_ERROR)
+    assert_equal(len(conn.streams[1].data), 0, "excess DATA is not delivered")
+    assert_false(conn.sent_goaway, "content-length mismatch is a stream error")
+    assert_equal(conn.recv_window, DEFAULT_WINDOW_SIZE)
+    assert_rst_and_connection_credit(
+        Span(conn.take_pending_output()), 1, ERR_PROTOCOL_ERROR, 1
+    )
+
+
+def test_server_accepts_body_matching_content_length() raises:
+    var conn = request_with_content_length("8286845c810f")
+    var body = List[Byte](length=1, fill=0x62)
+    conn.process_frame(make_frame(FRAME_DATA, FLAG_END_STREAM, 1, body^))
+    assert_true(conn.streams[1].end_stream)
+    assert_false(Bool(conn.streams[1].reset_code), "a matching body is accepted")
+    assert_equal(len(conn.streams[1].data), 1)
+    assert_equal(conn.streams[1].expected_content_length, 1)
+
+
+def test_server_rejects_trailer_content_length_conflict() raises:
+    # Headers declare 5. One DATA byte, then a trailer declaring 1.
+    var conn = request_with_content_length("8286845c816f")
+    assert_equal(conn.streams[1].expected_content_length, 5)
+    var body = List[Byte](length=1, fill=0x63)
+    conn.process_frame(make_frame(FRAME_DATA, 0, 1, body^))
+    _ = conn.take_pending_output()
+    conn.process_frame(
+        make_frame(
+            FRAME_HEADERS,
+            FLAG_END_HEADERS | FLAG_END_STREAM,
+            1,
+            from_hex("5c810f"),
+        )
+    )
+    assert_equal(conn.streams[1].reset_code.or_else(0), ERR_PROTOCOL_ERROR)
+    assert_equal(conn.streams[1].expected_content_length, 5)
+    assert_false(conn.streams[1].trailers_done, "the conflicting trailer is not stored")
+    assert_false(conn.sent_goaway, "malformed request is a stream error")
+
+
+def test_client_rejects_non_digit_response_content_length() raises:
+    # :status=200, content-length=-1
+    var conn = make_client()
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 1, from_hex("885c82583f"))
+    )
+    assert_false(conn.streams[1].headers_done, "response content-length must be digits")
+    assert_equal(conn.streams[1].reset_code.value(), ERR_PROTOCOL_ERROR)
+    assert_false(conn.sent_goaway, "malformed response is a stream error")
+
+
+def test_client_rejects_response_body_beyond_content_length() raises:
+    # :status=200, content-length=1
+    var conn = make_client()
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 1, from_hex("885c810f"))
+    )
+    assert_equal(conn.streams[1].expected_content_length, 1)
+    _ = conn.take_pending_output()
+    var payload = List[Byte](length=2, fill=0x64)
+    conn.process_frame(make_frame(FRAME_DATA, 0, 1, payload^))
+    assert_equal(len(conn.streams[1].data), 0, "excess response DATA is not delivered")
+    assert_equal(conn.streams[1].reset_code.or_else(0), ERR_PROTOCOL_ERROR)
+    assert_false(conn.sent_goaway, "content-length mismatch is a stream error")
+    assert_equal(conn.recv_window, DEFAULT_WINDOW_SIZE)
+    assert_rst_and_connection_credit(
+        Span(conn.take_pending_output()), 1, ERR_PROTOCOL_ERROR, 2
+    )
+
+
+def test_client_rejects_short_response_body() raises:
+    # :status=200, content-length=2, one DATA byte with END_STREAM.
+    var conn = make_client()
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 1, from_hex("885c8117"))
+    )
+    var body = List[Byte](length=1, fill=0x65)
+    conn.process_frame(make_frame(FRAME_DATA, FLAG_END_STREAM, 1, body^))
+    assert_equal(conn.streams[1].reset_code.or_else(0), ERR_PROTOCOL_ERROR)
+    assert_equal(len(conn.streams[1].data), 1, "a short body stays buffered")
+    assert_false(conn.sent_goaway, "content-length mismatch is a stream error")
+
+
+def test_client_accepts_response_body_matching_content_length() raises:
+    var conn = make_client()
+    conn.process_frame(
+        make_frame(FRAME_HEADERS, FLAG_END_HEADERS, 1, from_hex("885c8117"))
+    )
+    var body = List[Byte](length=2, fill=0x66)
+    conn.process_frame(make_frame(FRAME_DATA, FLAG_END_STREAM, 1, body^))
+    assert_true(conn.streams[1].headers_done)
+    assert_true(conn.streams[1].end_stream)
+    assert_false(Bool(conn.streams[1].reset_code), "a matching response body is accepted")
+    assert_equal(len(conn.streams[1].data), 2)
+    assert_equal(conn.streams[1].expected_content_length, 2)
+
+
 def test_process_frame_ignores_unknown_type() raises:
     var conn = make_client()
     conn.process_frame(make_frame(0xFE, 0, 0, List[Byte]()))
@@ -690,6 +815,15 @@ def main() raises:
     test_initial_window_change_ignores_finished_streams()
     test_server_accepts_digit_content_length()
     test_server_rejects_non_digit_content_length()
+    test_server_rejects_disagreeing_content_length()
+    test_server_accepts_repeated_content_length()
+    test_server_rejects_body_beyond_content_length()
+    test_server_accepts_body_matching_content_length()
+    test_server_rejects_trailer_content_length_conflict()
+    test_client_rejects_non_digit_response_content_length()
+    test_client_rejects_response_body_beyond_content_length()
+    test_client_rejects_short_response_body()
+    test_client_accepts_response_body_matching_content_length()
     test_process_frame_ignores_unknown_type()
     test_retired_stream_data_returns_connection_credit()
     test_retired_stream_over_window_is_connection_error()

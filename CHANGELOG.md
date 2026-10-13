@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A request or response `content-length` is one decimal length for the
+  whole message (RFC 9110 §8.6, RFC 9113 §8.1.1). Two values that parse as
+  different integers are a stream `PROTOCOL_ERROR`, including a trailer
+  that disagrees with the headers. The same integer may be repeated
+  (`10` and `010`). DATA that would exceed the declared length is
+  discarded and its connection flow-control credit is returned, on both
+  endpoints. Previously the last field won, bytes past the length stayed
+  buffered until `END_STREAM`, and a response `content-length` was ignored.
+
 ## 0.2.10 - 2026-10-08
 
 - Discarded DATA returns connection flow-control credit. A frame on a

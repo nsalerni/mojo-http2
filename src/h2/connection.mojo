@@ -1523,6 +1523,17 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                     ERR_PROTOCOL_ERROR, String("DATA padding exceeds payload")
                 )
             payload = payload[1 : data_len - pad]
+        # RFC 9113 §8.1.1: a content-length that is already exceeded cannot
+        # match the message. Discard the frame and return connection credit.
+        var expected = self.streams[h.stream_id].expected_content_length
+        if (
+            expected >= 0
+            and self.streams[h.stream_id].received_data_len + len(payload)
+            > expected
+        ):
+            self._stream_error(h.stream_id, ERR_PROTOCOL_ERROR)
+            self._replenish(h)
+            return
         self.streams[h.stream_id].data.extend(payload)
         self.streams[h.stream_id].received_data_len += len(payload)
         if h.has_flag(FLAG_END_STREAM):
@@ -1542,10 +1553,65 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
         self._queue_frame(FRAME_WINDOW_UPDATE, 0, 0, inc)
 
     def _check_content_length(mut self, sid: UInt32) raises:
-        """Reset the stream if actual DATA length contradicts content-length."""
+        """Reset the stream if received DATA does not equal content-length.
+
+        Called when the peer finishes the message. A frame that would make
+        the total larger than the declared length is rejected in `_on_data`
+        before those bytes are buffered.
+        """
         var expected = self.streams[sid].expected_content_length
         if expected >= 0 and self.streams[sid].received_data_len != expected:
             self._stream_error(sid, ERR_PROTOCOL_ERROR)
+
+    def _note_content_length(
+        mut self, sid: UInt32, fields: Span[HeaderField, _]
+    ) raises -> Bool:
+        """Records the content-length for one header or trailer block.
+
+        [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110) §8.6 requires
+        each value to be one or more decimal digits. The same integer may
+        be repeated (`10` and `010`); two different integers are malformed,
+        including a trailer that disagrees with the headers. The parsed
+        length is what [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113)
+        §8.1.1 compares with the DATA payload.
+
+        Args:
+            sid: Stream whose `expected_content_length` is updated.
+            fields: One complete header or trailer block, in wire order.
+
+        Returns:
+            False when a content-length value is empty, non-digit,
+            unrepresentable, or disagrees with another value on this message.
+
+        Raises:
+            If `sid` is not in the stream table.
+        """
+        for f in fields:
+            if f.name != "content-length":
+                continue
+            var digits = f.value.as_bytes()
+            if len(digits) == 0:
+                return False
+            var n = 0
+            var significant = 0
+            var saw_nonzero = False
+            for d in digits:
+                var c = Int(d)
+                if c < ord("0") or c > ord("9"):
+                    return False
+                if c != ord("0"):
+                    saw_nonzero = True
+                if saw_nonzero:
+                    significant += 1
+                    # 18 significant digits fit in a signed 64-bit length.
+                    if significant > 18:
+                        return False
+                n = n * 10 + (c - ord("0"))
+            var already = self.streams[sid].expected_content_length
+            if already >= 0 and n != already:
+                return False
+            self.streams[sid].expected_content_length = n
+        return True
 
     def _on_headers(
         mut self, h: FrameHeader, var frame_payload: List[Byte]
@@ -1719,8 +1785,11 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self._stream_error(stream_id, ERR_PROTOCOL_ERROR)
             return
         if self.validate_requests and not self._validate_header_block(
-            stream_id, Span(fields), is_trailers
+            Span(fields), is_trailers
         ):
+            self._stream_error(stream_id, ERR_PROTOCOL_ERROR)
+            return
+        if not self._note_content_length(stream_id, Span(fields)):
             self._stream_error(stream_id, ERR_PROTOCOL_ERROR)
             return
         if not is_trailers:
@@ -1734,12 +1803,15 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
             self._check_content_length(stream_id)
 
     def _validate_header_block(
-        mut self,
-        sid: UInt32,
+        self,
         fields: Span[HeaderField, _],
         is_trailers: Bool,
-    ) raises -> Bool:
-        """RFC 9113 §8.1/§8.3 request validation. False = malformed."""
+    ) -> Bool:
+        """RFC 9113 §8.1/§8.3 request validation. False = malformed.
+
+        Content-length is recorded separately by `_note_content_length` so
+        responses are held to the same rule.
+        """
         var seen_regular = False
         var method_count = 0
         var scheme_count = 0
@@ -1776,18 +1848,6 @@ struct Http2Connection[S: IOStream = TCPStream](Movable):
                     return False  # connection-specific (§8.2.2)
                 if f.name == "te" and f.value != "trailers":
                     return False
-                if f.name == "content-length":
-                    # RFC 9110 §8.6: Content-Length = 1*DIGIT. Int() also
-                    # accepts signs, whitespace, and digit separators.
-                    if f.value.byte_length() == 0:
-                        return False
-                    for d in f.value.as_bytes():
-                        if Int(d) < ord("0") or Int(d) > ord("9"):
-                            return False
-                    try:
-                        self.streams[sid].expected_content_length = Int(f.value)
-                    except:
-                        return False
         if not is_trailers:
             if method_count != 1 or scheme_count != 1 or path_count != 1:
                 return False
